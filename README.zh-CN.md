@@ -1,10 +1,40 @@
-[English](README.md) | [简体中文](README.zh-CN.md)
-
-# TodoNotch
+<div align="center">
+  <img src="docs/assets/logo.png" width="96" alt="TodoNotch Logo" />
+  <h1>TodoNotch</h1>
+  <p>原生 macOS 14+ MacBook 刘海伴侣与 AI Agent 定时任务通知中枢</p>
+  <p>
+    <a href="README.md">English</a> | <a href="README.zh-CN.md">简体中文</a>
+  </p>
+</div>
 
 **TodoNotch** 是一款基于 macOS 14+ 原生技术栈（Swift 6 + SwiftUI / AppKit，零 Electron 依赖）打造的 MacBook 刘海常驻伴侣与 AI Agent 定时任务通知中枢。
 
 它常驻在 MacBook 物理刘海两侧（外接屏自动适配顶部菜单栏区域），以**零侵入只读模式**自动发现本地多个 AI 编程工具的定时任务与运行状态，同步跨项目每日待办清单，并通过 18 种动态矢量表情的机器人及时提醒异常或待办——同时不抢占当前编辑器焦点。
+
+---
+
+## 界面预览
+
+<p align="center">
+  <img src="docs/assets/preview-notch-hero.png" width="760" alt="TodoNotch 刘海胶囊、轻提示与机器人状态表情" />
+</p>
+
+<table>
+  <tr>
+    <td align="center" width="33%">
+      <img src="docs/assets/preview-tasks.png" alt="按工具分组的定时任务与近 7 天记录" /><br />
+      <sub><b>定时任务与近 7 天运行记录</b></sub>
+    </td>
+    <td align="center" width="33%">
+      <img src="docs/assets/preview-todos.png" alt="未读告警与跨项目每日待办" /><br />
+      <sub><b>未读告警与每日待办</b></sub>
+    </td>
+    <td align="center" width="33%">
+      <img src="docs/assets/preview-settings.png" alt="Lmemory、勿扰双屏与 Webhook 设置" /><br />
+      <sub><b>Lmemory、勿扰双屏与推送</b></sub>
+    </td>
+  </tr>
+</table>
 
 ---
 
@@ -85,19 +115,22 @@ python3 scan_todos.py --self-test
 
 ```text
 TodoNotch/
-├── Package.swift                 # SwiftPM 工程配置（macOS 14+, Swift 6）
+├── Package.swift                 # SwiftPM 工程配置（macOS 14+, Swift 6)
+├── Assets/
+│   └── AppIcon.icns              # macOS 圆角矩形应用图标
 ├── Sources/
 │   ├── TodoNotchCore/            # 核心状态机、SQLiteStore、Keychain、只读监听、Webhook 推送、Lmemory 安装器
 │   └── TodoNotch/                # AppKit 浮窗、多屏协调、AppViewModel 与 SwiftUI 视图
 ├── Tests/
 │   └── TodoNotchTests/           # 核心单元测试与隔离集成测试（CoreTests）
 ├── scripts/
-│   ├── build-app.sh              # Release 编译 + Info.plist + 内置 scan_todos.py + Ad-hoc 签名
+│   ├── build-app.sh              # Release 编译 + Info.plist + 内置 scan_todos.py + AppIcon.icns + Ad-hoc 签名
 │   ├── build-dmg.sh              # 独立临时目录打包并生成 UDZO 压缩 DMG
 │   ├── install.sh                # 编译并配置 LaunchAgent 开机自启
 │   └── uninstall.sh              # 卸载 LaunchAgent 与本地 TodoNotch 运行状态
 ├── scan_todos.py                 # 跨 Agent 对话待办扫描脚本（支持 --self-test / --notify）
 └── docs/
+    ├── assets/                   # README Logo 与界面截图
     ├── api.md                    # 本地事件投递与 Webhook 接口契约
     ├── database.md               # SQLite 表结构与 Keychain 安全边界
     ├── project-notes.md          # 架构约定与工程红线

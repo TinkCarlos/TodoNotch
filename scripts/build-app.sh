@@ -36,6 +36,12 @@ if [ -f "$ROOT/scan_todos.py" ]; then
   chmod +x "$APP_OUT/Contents/Resources/scan_todos.py"
 fi
 
+ICON_PLIST=""
+if [ -f "$ROOT/Assets/AppIcon.icns" ]; then
+  cp "$ROOT/Assets/AppIcon.icns" "$APP_OUT/Contents/Resources/AppIcon.icns"
+  ICON_PLIST=$'  <key>CFBundleIconFile</key>\n  <string>AppIcon</string>'
+fi
+
 cat > "$APP_OUT/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -51,6 +57,7 @@ cat > "$APP_OUT/Contents/Info.plist" <<PLIST
   <string>${VERSION}</string>
   <key>CFBundleShortVersionString</key>
   <string>${VERSION}</string>
+${ICON_PLIST}
   <key>LSUIElement</key>
   <true/>
   <key>NSHighResolutionCapable</key>

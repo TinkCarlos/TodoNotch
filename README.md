@@ -1,10 +1,40 @@
-[English](README.md) | [简体中文](README.zh-CN.md)
-
-# TodoNotch
+<div align="center">
+  <img src="docs/assets/logo.png" width="96" alt="TodoNotch Logo" />
+  <h1>TodoNotch</h1>
+  <p>Native macOS 14+ MacBook notch companion &amp; AI Agent scheduled-task notification hub</p>
+  <p>
+    <a href="README.md">English</a> | <a href="README.zh-CN.md">简体中文</a>
+  </p>
+</div>
 
 **TodoNotch** is a native macOS 14+ (Swift 6 + SwiftUI/AppKit, zero Electron) MacBook notch companion and AI Agent scheduled-task notification hub.
 
 It lives quietly inside your MacBook notch (or menu bar area on external displays), discovers scheduled automations across your local AI coding agents in read-only mode, tracks cross-project daily todos, and alerts you with an expressive animated pixel-vector robot—without stealing focus.
+
+---
+
+## Screenshots
+
+<p align="center">
+  <img src="docs/assets/preview-notch-hero.png" width="760" alt="TodoNotch Notch Pill, Light Toast, and Robot Moods" />
+</p>
+
+<table>
+  <tr>
+    <td align="center" width="33%">
+      <img src="docs/assets/preview-tasks.png" alt="Scheduled Tasks by Tool" /><br />
+      <sub><b>Scheduled Tasks &amp; 7-Day History</b></sub>
+    </td>
+    <td align="center" width="33%">
+      <img src="docs/assets/preview-todos.png" alt="Pending Todos &amp; Alerts" /><br />
+      <sub><b>Unread Alerts &amp; Daily Todos</b></sub>
+    </td>
+    <td align="center" width="33%">
+      <img src="docs/assets/preview-settings.png" alt="Lmemory, DND &amp; Webhook Settings" /><br />
+      <sub><b>Lmemory, DND &amp; Webhook</b></sub>
+    </td>
+  </tr>
+</table>
 
 ---
 
@@ -86,18 +116,21 @@ To remove the LaunchAgent, local app support state, and built `.app` bundle (wit
 ```text
 TodoNotch/
 ├── Package.swift                 # SwiftPM manifest (macOS 14+, Swift 6)
+├── Assets/
+│   └── AppIcon.icns              # macOS squircle app icon
 ├── Sources/
 │   ├── TodoNotchCore/            # Domain state machines, SQLiteStore, Keychain, Watchers, PushDispatcher, LmemoryInstaller
 │   └── TodoNotch/                # AppKit FloatingPanel, MultiScreenCoordinator, AppViewModel, SwiftUI Views
 ├── Tests/
 │   └── TodoNotchTests/           # Unit & isolation tests (CoreTests)
 ├── scripts/
-│   ├── build-app.sh              # Release build + Info.plist + bundled scan_todos.py + ad-hoc codesign
+│   ├── build-app.sh              # Release build + Info.plist + bundled scan_todos.py + AppIcon.icns + ad-hoc codesign
 │   ├── build-dmg.sh              # Isolated staging + compressed UDZO DMG builder
 │   ├── install.sh                # Build & install LaunchAgent auto-start
 │   └── uninstall.sh              # Clean removal of LaunchAgent & local TodoNotch state
 ├── scan_todos.py                 # Cross-agent conversation scanner (--self-test / --notify)
 └── docs/
+    ├── assets/                   # README logo & UI screenshots
     ├── api.md                    # Local inbox JSON & Webhook contracts
     ├── database.md               # SQLite schema & Keychain boundaries
     ├── project-notes.md          # Architecture & safety invariants
