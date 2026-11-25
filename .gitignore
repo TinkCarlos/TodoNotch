@@ -1,0 +1,13 @@
+.build/
+.swiftpm/
+*.xcodeproj
+.DS_Store
+TodoNotch.app/
+dist/
+*.dmg
+*.sha256
+last-scan.json
+state.json
+.trigger
+.talking-us/
+/TodoNotch/
