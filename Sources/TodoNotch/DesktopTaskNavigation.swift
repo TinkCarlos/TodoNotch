@@ -61,9 +61,12 @@ enum DesktopTaskNavigation {
         let detailPath = "/sidecars/\(task.nativeId)"
         let deadline = ContinuousClock.now + .seconds(12)
         var lastAction = ContinuousClock.now - .seconds(2)
-        var triedLabels: [String: Int] = [:]
+        var lastTypedSearch: (query: String, at: ContinuousClock.Instant)?
+        var searchContext: (window: AXUIElement, page: AXUIElement)?
+        var emptyQuery = ""
+        var sawEmptyResults = false
+        var openedRow = false
         var stage = "web area"
-        var lastTypedSearch: ContinuousClock.Instant?
         while ContinuousClock.now < deadline, !Task.isCancelled {
             if let window = frontWindow(root),
                let (page, url) = localPage(window, deadline: deadline) {
@@ -71,31 +74,54 @@ enum DesktopTaskNavigation {
                     log.info("Opened automation \(task.nativeId, privacy: .public)")
                     return .opened
                 }
-                if ContinuousClock.now - lastAction >= .milliseconds(450) {
+
+                let sameContext = searchContext.map { CFEqual($0.window, window) && CFEqual($0.page, page) } ?? false
+                if !sameContext, !openedRow {
+                    searchContext = (window, page)
+                    emptyQuery = "tn-" + UUID().uuidString.prefix(16).lowercased()
+                    sawEmptyResults = false
+                    lastTypedSearch = nil
+                }
+
+                if !openedRow, ContinuousClock.now - lastAction >= .milliseconds(450) {
                     if url.path == "/sidecars" {
-                        stage = "automation search"
-                        let filteredURL = URLComponents(url: url, resolvingAgainstBaseURL: false)?
-                            .queryItems?.contains { $0.name == "q" && $0.value == task.nativeId } == true
-                        let search = find(in: page, limit: 260, deadline: deadline, where: isAutomationSearch)
-                        if !filteredURL, let search {
-                            if lastTypedSearch.map({ ContinuousClock.now - $0 >= .milliseconds(1500) }) ?? true,
-                               submitSearch(task.nativeId, field: search, application: root, pid: pid) {
-                                lastTypedSearch = ContinuousClock.now
+                        let query = searchQuery(url)
+                        // The renderer can expose the new URL before replacing its result rows.
+                        // Observe this navigation's unique empty list before requesting the real filter.
+                        if !sawEmptyResults, query == emptyQuery,
+                           hasEmptyResults(in: page, for: emptyQuery, deadline: deadline) {
+                            sawEmptyResults = true
+                        }
+                        let requiredQuery = sawEmptyResults ? task.nativeId : emptyQuery
+                        stage = sawEmptyResults ? "filtered automation results" : "empty automation results"
+                        if query != requiredQuery {
+                            let mayRetry = lastTypedSearch.map {
+                                $0.query != requiredQuery || ContinuousClock.now - $0.at >= .milliseconds(1500)
+                            } ?? true
+                            if mayRetry,
+                               let search = find(in: page, limit: 260, deadline: deadline, where: isAutomationSearch),
+                               submitSearch(requiredQuery, field: search, application: root, pid: pid) {
+                                lastTypedSearch = (requiredQuery, ContinuousClock.now)
                                 lastAction = ContinuousClock.now
                             }
-                        } else if filteredURL {
-                            stage = "automation row"
-                            var offered: [String: Int] = [:]
-                            if let row = find(in: page, limit: 520, deadline: deadline, where: { element in
-                                guard attribute(element, kAXRoleAttribute) as? String == kAXButtonRole,
-                                      matchesTaskRow(element, name: task.displayName, deadline: deadline) else { return false }
-                                let key = label(element)
-                                offered[key, default: 0] += 1
-                                return offered[key, default: 0] > triedLabels[key, default: 0]
-                            }), press(row) {
-                                triedLabels[label(row), default: 0] += 1
-                                lastAction = ContinuousClock.now
-                            }
+                        } else if sawEmptyResults,
+                                  let candidates = findMatches(in: page, limit: 1500, count: 2, deadline: deadline, where: { element in
+                                      guard let role = requiredRole(element) else { return nil }
+                                      if role == kAXButtonRole {
+                                          return matchesTaskRow(element, name: task.displayName, deadline: deadline)
+                                      }
+                                      return isEmptyResultsLabel(element, for: emptyQuery)
+                                  }),
+                                  candidates.count == 1,
+                                  requiredRole(candidates[0]) == kAXButtonRole,
+                                  let currentWindow = frontWindow(root), CFEqual(currentWindow, window),
+                                  let (currentPage, currentURL) = localPage(currentWindow, deadline: deadline),
+                                  CFEqual(currentPage, page), currentURL.path == "/sidecars",
+                                  searchQuery(currentURL) == task.nativeId,
+                                  !Task.isCancelled, ContinuousClock.now < deadline,
+                                  press(candidates[0]) {
+                            openedRow = true
+                            stage = "automation detail"
                         }
                     } else {
                         stage = "automations sidebar"
@@ -128,16 +154,64 @@ enum DesktopTaskNavigation {
         _ window: AXUIElement, deadline: ContinuousClock.Instant
     ) -> (AXUIElement, URL)? {
         var found: URL?
-        let page = find(in: window, limit: 32, deadline: deadline) { element in
-            guard attribute(element, kAXRoleAttribute) as? String == "AXWebArea" else { return false }
-            let value = attribute(element, kAXURLAttribute)
-            guard let url = value as? URL ?? (value as? String).flatMap(URL.init(string:)),
-                  let host = url.host, ["127.0.0.1", "localhost", "::1"].contains(host) else { return false }
-            found = url
-            return true
+        let pages = findMatches(in: window, limit: 32, count: 1, deadline: deadline) { element in
+            guard let role = requiredRole(element) else { return nil }
+            guard role == "AXWebArea" else { return false }
+            var value: CFTypeRef?
+            switch AXUIElementCopyAttributeValue(element, kAXURLAttribute as CFString, &value) {
+            case .success:
+                guard let url = value as? URL ?? (value as? String).flatMap(URL.init(string:)),
+                      let host = url.host, ["127.0.0.1", "localhost", "::1"].contains(host) else { return false }
+                found = url
+                return true
+            case .noValue, .attributeUnsupported:
+                return false
+            default:
+                return nil
+            }
         }
-        guard let page, let found else { return nil }
+        guard let page = pages?.first, let found else { return nil }
         return (page, found)
+    }
+
+    private nonisolated static func searchQuery(_ url: URL) -> String? {
+        URLComponents(url: url, resolvingAgainstBaseURL: false)?
+            .queryItems?.first { $0.name == "q" }?.value
+    }
+
+    private nonisolated static func hasEmptyResults(
+        in page: AXUIElement, for query: String, deadline: ContinuousClock.Instant
+    ) -> Bool {
+        // A readable marker is sufficient here. The final row and page scans require complete reads.
+        var pending = [page]
+        var index = 0
+        while index < pending.count, index < 520, ContinuousClock.now < deadline, !Task.isCancelled {
+            let element = pending[index]
+            index += 1
+            if isEmptyResultsLabel(element, for: query) { return true }
+            if let children = attribute(element, kAXChildrenAttribute) as? [AXUIElement], pending.count < 520 {
+                pending.append(contentsOf: children.prefix(520 - pending.count))
+            }
+        }
+        return false
+    }
+
+    private nonisolated static func isEmptyResultsLabel(_ element: AXUIElement, for query: String) -> Bool {
+        let text = label(element)
+        guard text.contains(query), let role = requiredRole(element),
+              role != kAXButtonRole, role != kAXTextFieldRole, role != "AXSearchField", role != "AXLink" else { return false }
+        if isEmptyResultsText(text, for: query) { return true }
+
+        // Chromium can expose the words and the echoed query as separate static-text siblings.
+        guard let parent = attribute(element, kAXParentAttribute), CFGetTypeID(parent) == AXUIElementGetTypeID(),
+              let siblings = attribute(parent as! AXUIElement, kAXChildrenAttribute) as? [AXUIElement],
+              !siblings.isEmpty, siblings.count <= 8,
+              siblings.allSatisfy({ requiredRole($0) == kAXStaticTextRole }) else { return false }
+        return isEmptyResultsText(siblings.map(label).joined(separator: " "), for: query)
+    }
+
+    private nonisolated static func isEmptyResultsText(_ text: String, for query: String) -> Bool {
+        text.hasPrefix("No ") && text.contains(" match ") && text.contains(query)
     }
 
     private nonisolated static func press(_ element: AXUIElement) -> Bool {
@@ -146,13 +220,14 @@ enum DesktopTaskNavigation {
 
     private nonisolated static func matchesTaskRow(
         _ element: AXUIElement, name: String, deadline: ContinuousClock.Instant
-    ) -> Bool {
-        let caption = label(element)
+    ) -> Bool? {
+        guard let caption = strictLabel(element) else { return nil }
         guard caption == name || caption.hasPrefix(name + " ") || caption.isEmpty else { return false }
-        let firstText = find(in: element, limit: 16, deadline: deadline) {
-            attribute($0, kAXRoleAttribute) as? String == kAXStaticTextRole
-        }
-        return firstText.map { label($0) == name } ?? false
+        guard let texts = findMatches(in: element, limit: 16, count: 1, deadline: deadline, where: {
+            requiredRole($0).map { $0 == kAXStaticTextRole }
+        }) else { return nil }
+        guard let firstText = texts.first else { return false }
+        return strictLabel(firstText).map { $0 == name }
     }
 
     // Chromium's AXValue setter can change the field without notifying the renderer's search handler.
@@ -184,26 +259,70 @@ enum DesktopTaskNavigation {
 
     private nonisolated static func label(_ element: AXUIElement) -> String {
         for key in [kAXTitleAttribute, kAXDescriptionAttribute, kAXValueAttribute] {
-            if let text = attribute(element, key) as? String, !text.isEmpty { return text }
+            let raw = attribute(element, key)
+            if let text = raw as? String ?? (raw as? NSAttributedString)?.string, !text.isEmpty { return text }
         }
         return ""
+    }
+
+    private nonisolated static func strictLabel(_ element: AXUIElement) -> String? {
+        for key in [kAXTitleAttribute, kAXDescriptionAttribute, kAXValueAttribute] {
+            guard let text = stringAttribute(element, key) else { return nil }
+            if !text.isEmpty { return text }
+        }
+        return ""
+    }
+
+    private nonisolated static func requiredRole(_ element: AXUIElement) -> String? {
+        guard let role = stringAttribute(element, kAXRoleAttribute), !role.isEmpty else { return nil }
+        return role
+    }
+
+    private nonisolated static func stringAttribute(_ element: AXUIElement, _ key: String) -> String? {
+        _ = AXUIElementSetMessagingTimeout(element, 0.25)
+        var value: CFTypeRef?
+        switch AXUIElementCopyAttributeValue(element, key as CFString, &value) {
+        case .success: return value as? String ?? ""
+        case .noValue, .attributeUnsupported: return ""
+        default: return nil
+        }
     }
 
     private nonisolated static func find(
         in root: AXUIElement, limit: Int, deadline: ContinuousClock.Instant,
         where matches: (AXUIElement) -> Bool
     ) -> AXUIElement? {
+        findMatches(in: root, limit: limit, count: 1, deadline: deadline) { matches($0) }?.first
+    }
+
+    // Return nil on an incomplete scan, so an unseen second matching row cannot be mistaken for uniqueness.
+    private nonisolated static func findMatches(
+        in root: AXUIElement, limit: Int, count: Int, deadline: ContinuousClock.Instant,
+        where matches: (AXUIElement) -> Bool?
+    ) -> [AXUIElement]? {
         var pending = [root]
+        var found: [AXUIElement] = []
         var index = 0
-        while index < pending.count, index < limit, ContinuousClock.now < deadline, !Task.isCancelled {
+        while index < pending.count {
+            guard index < limit, ContinuousClock.now < deadline, !Task.isCancelled else { return nil }
             let element = pending[index]
             index += 1
-            if matches(element) { return element }
-            if let children = attribute(element, kAXChildrenAttribute) as? [AXUIElement], pending.count < limit {
-                pending.append(contentsOf: children.prefix(limit - pending.count))
+            guard let isMatch = matches(element) else { return nil }
+            if isMatch {
+                found.append(element)
+                if found.count == count { return found }
+            }
+            var value: CFTypeRef?
+            switch AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &value) {
+            case .success:
+                if let children = value as? [AXUIElement] { pending.append(contentsOf: children) }
+            case .noValue, .attributeUnsupported:
+                break
+            default:
+                return nil
             }
         }
-        return nil
+        return found
     }
 
     private nonisolated static func attribute(_ element: AXUIElement, _ key: String) -> AnyObject? {

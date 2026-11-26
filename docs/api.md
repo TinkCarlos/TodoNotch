@@ -7,6 +7,7 @@
 | `v0.2-design` (`20261124-1836`) | 2026-11-24 18:36 +08:00 | 建立首份本地触发契约（含开放第三方本地通知入口）与外部 SMTP/Webhook 推送契约 | `API-LOCAL-01`（`.trigger` JSON 事件）、`API-PUSH-01`（SMTP）、`API-PUSH-02`（Webhook） | 需求 `20261124-1748`（REQ-003, REQ-004, REQ-005） | 现行仅支持纯时间戳 `.trigger`；结构化契约为 v1 待实施 | 待实施与验证 |
 | `v1.0-impl` (`20261125-0815`) | 2026-11-25 08:15 +08:00 | 已实现 `inbox/` 原子 JSON 投递（`Watchers.swift` + `scan_todos.py`）、纯 Swift TLS 465 SMTP 与 5 平台 Webhook 客户端（`PushDispatcher.swift`） | `API-LOCAL-01`、`API-PUSH-01`、`API-PUSH-02` | 设计 `20261124-1836` 闭环实施 | macOS arm64 | 单元与隔离目录集成测试通过；真实 SMTP/Webhook 发信待用户在设置页填入授权码/URL 后实测 |
 | `v1.2-no-smtp` (`20261125-0933`) | 2026-11-25 09:33 +08:00 | 按用户确认移除 SMTP 邮件发送功能（`API-PUSH-01` 废弃），离席推送仅保留 5 平台 Webhook（`API-PUSH-02`） | `API-PUSH-01`（已移除） | 用户决定去掉邮箱发送功能 | macOS arm64 | `swift test` 8/8 通过，`TodoNotch.app` 重载生效 |
+| `20261126-retention-filter` | 2026-11-26 12:58 +08:00 | Antigravity 确认识别到空列表后再提交目标筛选，选择唯一匹配项并核对详情地址 | API-LOCAL-DISPATCH | 用户要求修复旧列表误点 | macOS arm64 本地开发版 | 14:31 实机复验打开 x-ai-vertical-daily |
 
 ---
 
@@ -68,3 +69,8 @@ TodoNotch 为**纯本地 macOS 原生桌面应用**，不暴露公网 HTTP 监�
 | WorkBuddy 定时任务 | `~/.workbuddy/workbuddy.db`、`~/.workbuddy-ai/workbuddy.db` | `SQLITE_OPEN_READONLY` + `busy_timeout=1000` | `automations.*`（`deleted_at IS NULL`）、`automation_runs.*` |
 | ZCode 定时任务 | `~/.zcode/cli/db/db.sqlite`、`~/.zcode/v2/{automations,scheduled-tasks,bot-config.v3}.json`、`~/.zcode/automations/*.json` | `SQLITE_OPEN_READONLY` + 只读 JSON | `workflow_definition`、`workflow_run` 及 JSON 定时任务字段 |
 | Lmemory 健康页 | `<Vault>/90 系统文件/自动化/夜间维护.md` | 只读 frontmatter | `nightly`, `nightly_at`, `lane` |
+
+## Antigravity 历史回执和桌面定位
+
+- 已有的派发历史使用 `dispatch_id` 关联本机桥接 `results/<dispatch_id>.json`。终态回执回写原事件，保留已读和推送状态。
+- 历史跳转先在同一窗口的网页区域读取当前刷新请求对应的空结果，再按 `native_id` 筛选。完整读到且只有一条匹配行时才点击，并核对 Antigravity 详情地址。

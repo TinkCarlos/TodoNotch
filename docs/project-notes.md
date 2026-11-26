@@ -6,6 +6,7 @@
 |---|---|---|---|---|---|---|
 | `v0.2-design` (`20261124-1836`) | 2026-11-24 18:36 +08:00 | 建立首份权威项目注意事项基线与 v1 待实施架构约束 | 整体架构、安全边界、运行入口、四份文档索引 | 基于需求 `20261124-1748`（`READY FOR DESIGN`）编写开发设计 | 现行原型 `TodoNotch/main.swift` + `scan_todos.py`（macOS arm64）；v1 尚待实施 | 原型已 `RUN`，v1 待实施 |
 | `v1.0-impl` (`20261125-0815`) | 2026-11-25 08:15 +08:00 | v1 原生 SwiftPM 工程实施完成并打包上线 `TodoNotch.app`（1.7 MB），已实机验证自动发现 22 项定时任务 | 全模块（`Sources/TodoNotchCore`、`Sources/TodoNotch`、`scripts/build-app.sh`） | 依据设计 `20261124-1836` 闭环实施 | macOS arm64 Swift 6.4.2，`PID 94661` 运行中 | `swift test` 7/7 通过，`scan_todos.py --self-test` 通过，实机 DB 自动发现 22 任务 |
+| `20261126-retention-filter` | 2026-11-26 12:58 +08:00 | 记录历史待确认关联保留和 Antigravity 列表刷新校验 | 桌面与回执恢复 | 用户要求修复剩余两项 P2 | macOS arm64 本地开发版 | 复审无 P1/P2，14:31 桌面复验通过 |
 
 ---
 
@@ -49,3 +50,8 @@
   - 扫描脚本：`<repo-root>/scan_todos.py`（已内置于 `.app/Contents/Resources/scan_todos.py`）
   - 定时任务：`~/.gemini/config/sidecars/daily-todo-reminder/sidecar.json`
 - **故障恢复**：应用日志写入 `~/Library/Logs/todo-notch.log`（脱敏）；若 SQLite 损坏，自动备份损坏库并重建空库（原有 Agent 定时任务与 `每日待办.md` 均不受损，重启后 10 秒内自动重新发现）。
+
+## Antigravity 历史兼容
+
+- 未收终态的派发历史是迟到回执的关联记录。收到终态后才按常规历史规则裁剪。历史兼容层消费已有桥接回执，可独立于手动派发入口。
+- 桌面跳转通过辅助功能读取 Antigravity，历史按钮等待列表实际刷新后再选择。

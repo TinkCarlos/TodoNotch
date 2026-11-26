@@ -266,14 +266,29 @@ public final class SQLiteStore: @unchecked Sendable {
         return changed
     }
 
+    private static let unconfirmedAntigravityHistory = """
+    source = 'antigravity' AND status = 'attention' AND summary = ?1
+      AND event_id GLOB 'dispatch:*'
+    """
+
     private func pruneEventsLocked(now: Int64) {
-        let cutoff = now - 30 * 86400
-        try? exec("DELETE FROM run_events WHERE occurred_at < \(cutoff);")
-        try? exec("""
-        DELETE FROM run_events WHERE event_id NOT IN (
-          SELECT event_id FROM run_events ORDER BY occurred_at DESC LIMIT 500
-        );
-        """)
+        let pending = Self.unconfirmedAntigravityHistory
+        // Pending dispatches are correlation records. Ordinary history limits apply once their receipts arrive.
+        let sql = """
+        DELETE FROM run_events
+        WHERE NOT (\(pending))
+          AND (occurred_at < ?2 OR event_id NOT IN (
+            SELECT event_id FROM run_events
+            WHERE NOT (\(pending)) AND occurred_at >= ?2
+            ORDER BY occurred_at DESC, event_id DESC LIMIT 500
+          ));
+        """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, 1, TodoDispatchRunner.unconfirmedAntigravitySummary)
+        sqlite3_bind_int64(stmt, 2, now - 30 * 86400)
+        sqlite3_step(stmt)
     }
 
     public func listUnconfirmedAntigravityHistory() -> [RunEvent] {
@@ -282,8 +297,7 @@ public final class SQLiteStore: @unchecked Sendable {
             SELECT event_id, task_key, task_name, source, status, summary, artifact_path, log_path,
                    is_read, push_status, push_error, occurred_at, created_at
             FROM run_events
-            WHERE source = 'antigravity' AND status = 'attention' AND summary = ?
-                  AND event_id GLOB 'dispatch:*';
+            WHERE \(Self.unconfirmedAntigravityHistory);
             """
             var stmt: OpaquePointer?
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }

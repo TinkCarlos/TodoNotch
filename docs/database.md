@@ -6,6 +6,7 @@
 |---|---|---|---|---|---|---|
 | `v0.2-design` (`20261124-1836`) | 2026-11-24 18:36 +08:00 | 建立首份本地存储规格：区分现行文件原型与 v1 待实施 SQLite 模型及 Keychain 凭据契约 | `monitored_tasks`、`run_events`、`notification_history`、`app_settings`、`audit_logs` | 需求 `20261124-1748`（REQ-002 ~ REQ-005） | 现行原型仅用 `state.json` + `每日待办.md`；SQLite 为 v1 待实施 | 待实施与验证 |
 | `v1.0-impl` (`20261125-0815`) | 2026-11-25 08:15 +08:00 | 已落地 `SQLiteStore.swift`（WAL、无外键、`user_version=1`）与 `KeychainSecretStore.swift`，并在本机自动建库落盘 | `~/Library/Application Support/TodoNotch/state.sqlite3`（4 表 + 6 索引） | 设计 `20261124-1836` 闭环实施 | macOS arm64 实机运行 | `swift test` 幂等与保留单测通过；实机建库并写入 22 条任务与 2 条事件 |
+| `20261126-retention-filter` | 2026-11-26 12:58 +08:00 | 未收回执的 Antigravity 待确认历史免于期限和数量裁剪 | run_events | 用户要求保留迟到回执关联依据 | macOS arm64 本地开发版 | 真实库只读检查，无迁移 |
 
 ---
 
@@ -52,7 +53,7 @@ CREATE INDEX IF NOT EXISTS idx_tasks_due ON monitored_tasks (source_status, next
 ```
 
 ### 3.2 `run_events`（任务运行事件与通知历史表）
-业务含义：记录每次定时任务完成、报错、漏跑或疑似待人工介入的事件，驱动刘海未读数、通知流展示及离席推送状态。保留策略：写入时自动滚动清理超过 30 天或超过 500 条的最旧记录（`F-05`）。
+业务含义：记录每次定时任务完成、报错、漏跑或疑似待人工介入的事件，驱动刘海未读数、通知流展示及离席推送状态。保留策略：写入时自动滚动清理超过 30 天或超过 500 条的普通历史（`F-05`）。Antigravity 待确认派发历史保留到收到终态回执，不占普通历史的 500 条额度。
 
 ```sql
 CREATE TABLE IF NOT EXISTS run_events (
