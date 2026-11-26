@@ -122,7 +122,7 @@ struct LightToastView: View {
 
 struct MainOverlayView: View {
     @ObservedObject var vm: AppViewModel
-    let onClose: () -> Void
+    let onClose: @MainActor () -> Void
 
     @State private var activeTab = 0
     @State private var expandedTaskKey: String? = nil
@@ -450,6 +450,17 @@ struct MainOverlayView: View {
                                     .foregroundColor(Color(white: 0.86))
                                     .lineLimit(1)
                                 Spacer(minLength: 4)
+                                if task.source == .antigravity {
+                                    Button(action: { vm.openScheduledTaskInDesktop(task, onOpened: onClose) }) {
+                                        Image(systemName: "arrow.up.right.square")
+                                            .font(.system(size: 10.5))
+                                            .foregroundColor(Color(red: 0.45, green: 0.78, blue: 1.0))
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help("在桌面应用打开定时任务")
+                                    .accessibilityLabel("在桌面应用打开定时任务 · \(task.displayName)")
+                                    .accessibilityIdentifier("desktop-task-\(ev.eventId)")
+                                }
                                 if !ev.artifactPath.isEmpty {
                                     Button(action: { vm.openFileSafely(ev.artifactPath) }) {
                                         Image(systemName: "doc.text")
@@ -765,7 +776,7 @@ struct MainOverlayView: View {
         case .attention: return .orange
         case .success: return .green
         case .running: return Color(red: 0.22, green: 0.74, blue: 0.97)
-        case .unknown: return Color(white: 0.55)
+        case .stopped, .unknown: return Color(white: 0.55)
         }
     }
 
@@ -775,6 +786,7 @@ struct MainOverlayView: View {
         case .error, .missed: return "xmark.circle.fill"
         case .attention: return "exclamationmark.circle.fill"
         case .running: return "clock.fill"
+        case .stopped: return "stop.circle"
         case .unknown: return "circle"
         }
     }

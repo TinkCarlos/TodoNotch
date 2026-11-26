@@ -219,7 +219,9 @@ final class AppViewModel: ObservableObject {
     private func runFullDiscovery(isInitialSeed: Bool) {
         let disc = self.discovery
         let vault = self.config.vaultPath
+        let store = self.store
         DispatchQueue.global(qos: .utility).async { [weak self] in
+            Self.repairAntigravityHistory(in: store)
             let snap = disc.scanAll()
             let health = disc.readLmemoryHealth(configuredVault: vault)
             Task { @MainActor [weak self] in
@@ -244,6 +246,45 @@ final class AppViewModel: ObservableObject {
                 self.recomputeRobot()
             }
         }
+    }
+
+    // Existing pending history can outlive the task's latest dispatch.
+    private nonisolated static func repairAntigravityHistory(in store: SQLiteStore) {
+        for event in store.listUnconfirmedAntigravityHistory() {
+            let dispatchId = String(event.eventId.dropFirst("dispatch:".count))
+            guard UUID(uuidString: dispatchId) != nil,
+                  let result = TodoDispatchRunner.readBridgeResult(dispatchId: dispatchId) else { continue }
+
+            let path = antigravityTranscriptPath(result.conversationId) ?? event.artifactPath
+            let status: RunStatus
+            let summary: String
+            switch result.status {
+            case "stopped":
+                status = .stopped
+                summary = "已手动停止"
+            case "failed":
+                status = .error
+                summary = result.error.isEmpty ? "Antigravity Desktop failed" : result.error
+            case "completed":
+                let completion = TodoDispatchRunner.antigravityCompletion(result, transcriptPath: path)
+                status = completion.status == .completed ? .success : .attention
+                summary = completion.summary
+            default:
+                continue
+            }
+            let resolved = RunEvent(
+                eventId: event.eventId, taskKey: event.taskKey, taskName: event.taskName, source: event.source,
+                status: status, summary: summary, artifactPath: path, logPath: event.logPath,
+                occurredAt: result.updatedAt ?? event.occurredAt
+            )
+            _ = store.repairUnconfirmedAntigravityHistory(resolved)
+        }
+    }
+
+    private nonisolated static func antigravityTranscriptPath(_ conversationId: String) -> String? {
+        guard UUID(uuidString: conversationId) != nil else { return nil }
+        return FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".gemini/antigravity/brain/\(conversationId)/.system_generated/logs/transcript.jsonl").path
     }
 
     private func drainInboxAsync() {
@@ -510,6 +551,23 @@ final class AppViewModel: ObservableObject {
         Task {
             await pushDispatcher.dispatch(event: event, config: cfg)
             self.events = self.store.listEvents(limit: 80)
+        }
+    }
+
+    private var desktopNavigation: Task<Void, Never>?
+
+    func openScheduledTaskInDesktop(_ task: MonitoredTask, onOpened: @escaping @MainActor () -> Void) {
+        desktopNavigation?.cancel()
+        desktopNavigation = Task { [weak self] in
+            guard let self else { return }
+            switch await DesktopTaskNavigation.open(task) {
+            case .opened:
+                if !Task.isCancelled { onOpened() }
+            case .needsAccessibility:
+                self.showInlineNotice("请在系统设置 → 隐私与安全性 → 辅助功能中允许 TodoNotch，再点一次")
+            case .unavailable:
+                if !Task.isCancelled { self.showInlineNotice("未能定位到这条定时任务") }
+            }
         }
     }
 

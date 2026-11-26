@@ -222,39 +222,48 @@ public final class SQLiteStore: @unchecked Sendable {
 
     // MARK: - Run Events (Idempotent + Rolling Retention)
 
-    /// Returns true if inserted (new event), false if duplicate event_id ignored.
+    /// An existing event ID produces no duplicate notification.
     @discardableResult
     public func insertEventIfNew(_ ev: RunEvent) -> Bool {
-        queue.sync {
-            let sql = """
-            INSERT OR IGNORE INTO run_events (
-              event_id, task_key, task_name, source, status, summary,
-              artifact_path, log_path, is_read, push_status, push_error, occurred_at, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-            """
-            var stmt: OpaquePointer?
-            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return false }
-            defer { sqlite3_finalize(stmt) }
-            bindText(stmt, 1, ev.eventId)
-            bindText(stmt, 2, ev.taskKey)
-            bindText(stmt, 3, ev.taskName)
-            bindText(stmt, 4, ev.source.rawValue)
-            bindText(stmt, 5, ev.status.rawValue)
-            bindText(stmt, 6, ev.summary)
-            bindText(stmt, 7, ev.artifactPath)
-            bindText(stmt, 8, ev.logPath)
-            sqlite3_bind_int(stmt, 9, ev.isRead ? 1 : 0)
-            bindText(stmt, 10, ev.pushStatus)
-            bindText(stmt, 11, ev.pushError)
-            sqlite3_bind_int64(stmt, 12, ev.occurredAt)
-            sqlite3_bind_int64(stmt, 13, ev.createdAt)
-            sqlite3_step(stmt)
-            let inserted = sqlite3_changes(db) > 0
-            if inserted {
-                pruneEventsLocked(now: ev.createdAt)
-            }
-            return inserted
-        }
+        queue.sync { writeEventLocked(ev) == true }
+    }
+
+    private func writeEventLocked(_ ev: RunEvent, replacingUnconfirmed: Bool = false) -> Bool? {
+        let conflict = replacingUnconfirmed ? """
+            DO UPDATE SET status = excluded.status, summary = excluded.summary,
+                artifact_path = excluded.artifact_path, log_path = excluded.log_path,
+                occurred_at = excluded.occurred_at
+            WHERE run_events.task_key = excluded.task_key AND run_events.source = excluded.source
+                AND run_events.status = 'attention' AND run_events.summary = ?
+            """ : "DO NOTHING"
+        let sql = """
+        INSERT INTO run_events (
+          event_id, task_key, task_name, source, status, summary,
+          artifact_path, log_path, is_read, push_status, push_error, occurred_at, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(event_id) \(conflict);
+        """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, 1, ev.eventId)
+        bindText(stmt, 2, ev.taskKey)
+        bindText(stmt, 3, ev.taskName)
+        bindText(stmt, 4, ev.source.rawValue)
+        bindText(stmt, 5, ev.status.rawValue)
+        bindText(stmt, 6, ev.summary)
+        bindText(stmt, 7, ev.artifactPath)
+        bindText(stmt, 8, ev.logPath)
+        sqlite3_bind_int(stmt, 9, ev.isRead ? 1 : 0)
+        bindText(stmt, 10, ev.pushStatus)
+        bindText(stmt, 11, ev.pushError)
+        sqlite3_bind_int64(stmt, 12, ev.occurredAt)
+        sqlite3_bind_int64(stmt, 13, ev.createdAt)
+        if replacingUnconfirmed { bindText(stmt, 14, TodoDispatchRunner.unconfirmedAntigravitySummary) }
+        guard sqlite3_step(stmt) == SQLITE_DONE else { return nil }
+        let changed = sqlite3_changes(db) > 0
+        if changed { pruneEventsLocked(now: ev.createdAt) }
+        return changed
     }
 
     private func pruneEventsLocked(now: Int64) {
@@ -265,6 +274,31 @@ public final class SQLiteStore: @unchecked Sendable {
           SELECT event_id FROM run_events ORDER BY occurred_at DESC LIMIT 500
         );
         """)
+    }
+
+    public func listUnconfirmedAntigravityHistory() -> [RunEvent] {
+        queue.sync {
+            let sql = """
+            SELECT event_id, task_key, task_name, source, status, summary, artifact_path, log_path,
+                   is_read, push_status, push_error, occurred_at, created_at
+            FROM run_events
+            WHERE source = 'antigravity' AND status = 'attention' AND summary = ?
+                  AND event_id GLOB 'dispatch:*';
+            """
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+            defer { sqlite3_finalize(stmt) }
+            bindText(stmt, 1, TodoDispatchRunner.unconfirmedAntigravitySummary)
+            return readEventRows(stmt)
+        }
+    }
+
+    public func repairUnconfirmedAntigravityHistory(_ event: RunEvent) -> Bool {
+        guard event.source == .antigravity, event.eventId.hasPrefix("dispatch:") else { return false }
+        return queue.sync {
+            // An old run may no longer occupy the task's latest-dispatch row.
+            writeEventLocked(event, replacingUnconfirmed: true) == true
+        }
     }
 
     public func updateEventPush(eventId: String, status: String, error: String) {

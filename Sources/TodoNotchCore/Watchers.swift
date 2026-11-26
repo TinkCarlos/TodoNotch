@@ -895,7 +895,7 @@ public final class TaskDiscoveryService: @unchecked Sendable {
                   let eventId = obj["event_id"] as? String, !eventId.isEmpty,
                   let taskId = obj["task_id"] as? String, !taskId.isEmpty,
                   let statusRaw = obj["status"] as? String,
-                  let status = RunStatus(rawValue: statusRaw) else {
+                  let status = RunStatus(rawValue: statusRaw), status != .stopped else {
                 try? fm.createDirectory(at: rejectedDir, withIntermediateDirectories: true)
                 try? fm.moveItem(at: url, to: rejectedDir.appendingPathComponent(url.lastPathComponent))
                 continue

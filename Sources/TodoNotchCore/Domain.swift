@@ -29,10 +29,19 @@ public enum NotifyLevel: String, Codable, CaseIterable, Sendable {
 public enum RunStatus: String, Codable, Sendable {
     case unknown
     case running
+    case stopped
     case success
     case attention
     case error
     case missed
+}
+
+public enum TodoDispatchStatus: String, Codable, Equatable, Sendable {
+    case running
+    case completed
+    case needsAttention = "needs_attention"
+    case failed
+    case stopped
 }
 
 public enum RobotMood: String, Equatable, Sendable {
@@ -358,7 +367,7 @@ public enum NotificationPolicy {
         taskLevel: NotifyLevel,
         isDND: Bool
     ) -> NotificationAction {
-        if taskLevel == .muted { return .silentOnly }
+        if taskLevel == .muted || eventStatus == .stopped { return .silentOnly }
         if isDND { return .silentOnly }
         if eventStatus == .error || eventStatus == .missed || eventStatus == .attention || taskLevel == .priority {
             return .fullPopup(pushExternal: true)
