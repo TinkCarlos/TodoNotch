@@ -1864,4 +1864,228 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(box.value?.summary, "Unsupported or empty scheduled task config")
     }
 
+    func testTodoCompletionEvidenceCollectionAndFingerprintDedup() throws {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("todonotch-poll-ev-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        let vault = tmp.appendingPathComponent("vault")
+        let excerptsDir = vault.appendingPathComponent("05 时间日志/会话摘录")
+        try FileManager.default.createDirectory(at: excerptsDir, withIntermediateDirectories: true)
+
+        let now = Date()
+        let cal = Calendar.current
+        let comps = cal.dateComponents([.year, .month, .day], from: now)
+        let codexDayDir = tmp.appendingPathComponent(
+            String(format: ".codex/sessions/%04d/%02d/%02d", comps.year!, comps.month!, comps.day!)
+        )
+        try FileManager.default.createDirectory(at: codexDayDir, withIntermediateDirectories: true)
+
+        let agyLogsA = tmp.appendingPathComponent(".gemini/antigravity/brain/agy11111-0000-0000-0000-000000000001/.system_generated/logs")
+        let agyLogsNoise = tmp.appendingPathComponent(".gemini/antigravity/brain/agy99999-0000-0000-0000-000000000009/.system_generated/logs")
+        try FileManager.default.createDirectory(at: agyLogsA, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: agyLogsNoise, withIntermediateDirectories: true)
+
+        // Old source session (before baseline) + newer first source session (after baseline)
+        let codexFirst = codexDayDir.appendingPathComponent("rollout-2026-11-27T10-00-00-01a20001-1111-2222-3333-444455556666.jsonl")
+        let codexFirstLines = [
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"01a20001-1111-2222-3333-444455556666\",\"cwd\":\"/Users/demo/projects/AlphaProj\",\"originator\":\"Codex Desktop\"}}",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"发布 Alpha\"}]}}",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"已完成提交并上线发布 Alpha。\"}]}}"
+        ].joined(separator: "\n") + "\n"
+        try codexFirstLines.write(to: codexFirst, atomically: true, encoding: .utf8)
+
+        let agyTranscript = agyLogsA.appendingPathComponent("transcript.jsonl")
+        try ("{\"type\":\"USER_INPUT\",\"content\":\"旧进展 /Users/demo/projects/AlphaProj\"}\n"
+            + "{\"type\":\"PLANNER_RESPONSE\",\"content\":\"等待后续确认\"}\n")
+            .write(to: agyTranscript, atomically: true, encoding: .utf8)
+
+        // Newer same-project session for BetaProj (no source update, matched by project)
+        let codexBeta = codexDayDir.appendingPathComponent("rollout-2026-11-27T10-20-00-01a20002-1111-2222-3333-444455556666.jsonl")
+        let codexBetaLines = [
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"01a20002-1111-2222-3333-444455556666\",\"cwd\":\"/Users/demo/projects/BetaProj\",\"originator\":\"Codex Desktop\"}}",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"收尾 Beta\"}]}}",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Beta 全部验收通过并已关闭。\"}]}}"
+        ].joined(separator: "\n") + "\n"
+        try codexBetaLines.write(to: codexBeta, atomically: true, encoding: .utf8)
+
+        // Noise session containing promptMarker must be excluded
+        let agyNoise = agyLogsNoise.appendingPathComponent("transcript.jsonl")
+        try ("{\"type\":\"USER_INPUT\",\"content\":\"\(TodoCompletionPoller.promptMarker) /Users/demo/projects/BetaProj\"}\n"
+            + "{\"type\":\"PLANNER_RESPONSE\",\"content\":\"{\\\"results\\\":[]}\"}\n")
+            .write(to: agyNoise, atomically: true, encoding: .utf8)
+
+        let baselineTs = Int64(now.timeIntervalSince1970) - 300
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: TimeInterval(baselineTs + 120))], ofItemAtPath: codexFirst.path)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: TimeInterval(baselineTs - 1200))], ofItemAtPath: agyTranscript.path)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: TimeInterval(baselineTs + 180))], ofItemAtPath: codexBeta.path)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: TimeInterval(baselineTs + 200))], ofItemAtPath: agyNoise.path)
+
+        let md = """
+        ---
+        updated_at: \(ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: TimeInterval(baselineTs + 600))))
+        ---
+        ## 待你亲自处理
+        - [ ] **[AlphaProj]** 发布 Alpha — 来源：2026-11-27 codex (01a20001)、antigravity (agy11111)
+        - [ ] **[BetaProj]** 收尾 Beta — 来源：2026-11-25 codex (01a29999)
+        - [ ] **[GammaProj]** 运行中的任务 — 来源：2026-11-27 codex (01a20002)
+        - [ ] **[DeltaProj]** 无更新的任务 — 来源：2026-11-25 codex (01a28888)
+        """
+        let parsed = TodoMarkdownParser.parse(md)
+        XCTAssertEqual(parsed.items.count, 4)
+        let parsedBaseline = TodoCompletionPoller.parseTodoBaselineTimestamp(markdown: md, fileMtime: baselineTs)
+        XCTAssertEqual(parsedBaseline, baselineTs)
+
+        let runningKey = parsed.items[2].todoKey
+        let firstPass = TodoCompletionPoller.collectChangedCandidates(
+            openTodos: parsed.items,
+            runningTodoKeys: [runningKey],
+            baselineTs: baselineTs,
+            previousFingerprints: [:],
+            vaultPath: vault.path,
+            homeDir: tmp,
+            includeGitCommits: false
+        )
+        XCTAssertEqual(Set(firstPass.map(\.item.project)), ["AlphaProj", "BetaProj"])
+
+        let alphaPacket = try XCTUnwrap(firstPass.first(where: { $0.item.project == "AlphaProj" }))
+        // Verifies multi-source resolution picked up the first source (01a20001), not only .last (agy11111)
+        XCTAssertTrue(alphaPacket.sessions.contains(where: { $0.agent == "codex" && $0.sessionId.hasPrefix("01a20001") && $0.relation == "source" }))
+
+        let betaPacket = try XCTUnwrap(firstPass.first(where: { $0.item.project == "BetaProj" }))
+        XCTAssertTrue(betaPacket.sessions.contains(where: { $0.agent == "codex" && $0.sessionId.hasPrefix("01a20002") && $0.relation == "project" }))
+        XCTAssertFalse(betaPacket.sessions.contains(where: { $0.sessionId.contains("agy99999") }))
+
+        // Unchanged fingerprints must be skipped on the next 5-min poll
+        let prevFP = Dictionary(uniqueKeysWithValues: firstPass.map { ($0.item.todoKey, $0.fingerprint) })
+        let secondPass = TodoCompletionPoller.collectChangedCandidates(
+            openTodos: parsed.items,
+            runningTodoKeys: [runningKey],
+            baselineTs: baselineTs,
+            previousFingerprints: prevFP,
+            vaultPath: vault.path,
+            homeDir: tmp,
+            includeGitCommits: false
+        )
+        XCTAssertTrue(secondPass.isEmpty)
+
+        // Bumping codexBeta mtime re-triggers BetaProj only
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: TimeInterval(baselineTs + 240))], ofItemAtPath: codexBeta.path)
+        let thirdPass = TodoCompletionPoller.collectChangedCandidates(
+            openTodos: parsed.items,
+            runningTodoKeys: [runningKey],
+            baselineTs: baselineTs,
+            previousFingerprints: prevFP,
+            vaultPath: vault.path,
+            homeDir: tmp,
+            includeGitCommits: false
+        )
+        XCTAssertEqual(thirdPass.map(\.item.project), ["BetaProj"])
+    }
+
+    func testTodoCompletionMultiCLIFallbackAndStrictParsing() throws {
+        for agent in TodoCompletionPoller.defaultCLIFallbackOrder {
+            let cmd = TodoCompletionPoller.buildVerificationCommand(
+                agent: agent,
+                executable: "/usr/local/bin/\(agent)",
+                prompt: "PROMPT",
+                outputFile: "/tmp/out.txt"
+            )
+            XCTAssertFalse(cmd.arguments.isEmpty, "expected args for \(agent)")
+            XCTAssertTrue(cmd.arguments.contains("PROMPT"))
+        }
+
+        let itemA = TodoItem(id: 1, section: "personal", project: "P1", text: "任务 A", done: false)
+        let itemB = TodoItem(id: 2, section: "project", project: "P2", text: "任务 B", done: false)
+        let itemC = TodoItem(id: 3, section: "project", project: "P3", text: "任务 C", done: false)
+        let candidates = [
+            TodoEvidencePacket(item: itemA, fingerprint: "fpA", sessions: []),
+            TodoEvidencePacket(item: itemB, fingerprint: "fpB", sessions: []),
+            TodoEvidencePacket(item: itemC, fingerprint: "fpC", sessions: [])
+        ]
+
+        final class CallRecorder: @unchecked Sendable {
+            var calls: [String] = []
+        }
+        let recorder = CallRecorder()
+        let result = TodoCompletionPoller.verifyCandidates(
+            candidates: candidates,
+            cliOrder: ["codex", "claude", "pi", "opencode"],
+            executableResolver: { agent, _ in "/mock/bin/\(agent)" },
+            commandRunner: { executable, _, _, _, _, _ in
+                let name = URL(fileURLWithPath: executable).lastPathComponent
+                recorder.calls.append(name)
+                if name == "codex" {
+                    return TodoCLIExecutionOutput(exitCode: 1, output: "", stderr: "quota exceeded")
+                }
+                if name == "claude" {
+                    return TodoCLIExecutionOutput(exitCode: 0, output: "Sorry, cannot parse", stderr: "")
+                }
+                let json = """
+                ```json
+                {
+                  "results": [
+                    {"todoKey": "\(itemA.todoKey)", "completed": true, "confidence": "HIGH", "reason": "已合并部署并线上验收通过"},
+                    {"todoKey": "\(itemB.todoKey)", "completed": true, "confidence": "medium", "reason": "仅部分子项完成"},
+                    {"todoKey": "\(itemC.todoKey)", "completed": false, "confidence": "high", "reason": "仍有阻塞项"},
+                    {"todoKey": "unknown_key_1234", "completed": true, "confidence": "high", "reason": "未知 key 应忽略"}
+                  ]
+                }
+                ```
+                """
+                return TodoCLIExecutionOutput(exitCode: 0, output: json, stderr: "")
+            }
+        )
+
+        XCTAssertEqual(recorder.calls, ["codex", "claude", "pi"])
+        XCTAssertEqual(result.attemptedCLIs, ["codex", "claude", "pi"])
+        XCTAssertEqual(result.cliUsed, "pi")
+        XCTAssertEqual(result.completedVerdicts.map(\.todoKey), [itemA.todoKey])
+        XCTAssertEqual(result.checkedFingerprints, [
+            itemA.todoKey: "fpA",
+            itemB.todoKey: "fpB",
+            itemC.todoKey: "fpC"
+        ])
+
+        // When every CLI fails, checkedFingerprints remains empty so next poll retries
+        let failResult = TodoCompletionPoller.verifyCandidates(
+            candidates: candidates,
+            cliOrder: ["codex", "claude"],
+            executableResolver: { agent, _ in "/mock/bin/\(agent)" },
+            commandRunner: { _, _, _, _, _, _ in
+                TodoCLIExecutionOutput(exitCode: 1, output: "", stderr: "unavailable")
+            }
+        )
+        XCTAssertTrue(failResult.checkedFingerprints.isEmpty)
+        XCTAssertTrue(failResult.completedVerdicts.isEmpty)
+        XCTAssertFalse(failResult.errorDetail.isEmpty)
+    }
+
+    func testTodoCompletionSafeMarkdownWriteback() throws {
+        let md = """
+        ## 待你亲自处理
+        - [ ] **[Alpha]** 子项1和子项2全部完成 — 来源：2026-11-27 codex (01a20001)
+        - [ ] **[Beta]** 运行中的待办 — 来源：2026-11-27 codex (01a20002)
+
+        ## 进行中 / 未收尾项目任务
+        - [ ] **[Gamma]** 仅完成一半的待办 — 来源：2026-11-27 codex (01a20003)
+        """
+        let items = TodoMarkdownParser.parse(md).items
+        XCTAssertEqual(items.count, 3)
+
+        let verdicts = [
+            TodoCompletionVerdict(todoKey: items[0].todoKey, completed: true, confidence: "high", reason: "已上线"),
+            TodoCompletionVerdict(todoKey: items[1].todoKey, completed: true, confidence: "high", reason: "运行中应跳过"),
+            TodoCompletionVerdict(todoKey: items[2].todoKey, completed: true, confidence: "medium", reason: "置信度不足")
+        ]
+        let applied = TodoCompletionPoller.applyAutoCompletions(
+            to: md,
+            verdicts: verdicts,
+            runningTodoKeys: [items[1].todoKey]
+        )
+        XCTAssertEqual(applied.completedKeys, [items[0].todoKey])
+        XCTAssertTrue(applied.updatedMarkdown.contains("- [x] **[Alpha]** 子项1和子项2全部完成"))
+        XCTAssertTrue(applied.updatedMarkdown.contains("- [ ] **[Beta]** 运行中的待办"))
+        XCTAssertTrue(applied.updatedMarkdown.contains("- [ ] **[Gamma]** 仅完成一半的待办"))
+    }
 }

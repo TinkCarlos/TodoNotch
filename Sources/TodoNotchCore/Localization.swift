@@ -526,6 +526,20 @@ public enum L10n {
         }
     }
 
+    public static func autoCompletedTodosTitle(_ count: Int, _ lang: AppLanguage) -> String {
+        lang == .zhHans
+            ? "自动消项 \(count) 条待办"
+            : "Auto-completed \(count) todo\(count == 1 ? "" : "s")"
+    }
+
+    public static func autoCompletedTodosSummary(_ labels: [String], _ lang: AppLanguage) -> String {
+        let preview = Array(labels.prefix(3)).joined(separator: " · ")
+        let remaining = labels.count - 3
+        if remaining > 0 {
+            return lang == .zhHans ? "\(preview) 等 \(labels.count) 项" : "\(preview) +\(remaining) more"
+        }
+        return preview
+    }
 }
 
 public extension NotifyLevel {

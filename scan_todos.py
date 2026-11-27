@@ -64,6 +64,7 @@ NOISE_RE = re.compile(
     r"Act as the review sub-agent|Delegated task node|纠正候选|纠正[｜：:]|"
     r"<heartbeat>|请严格按以下(?:闭环|防限流)|请作为 Boloop|"
     r"请执行每日\s*9\s*点跨项目待办扫描|<t3_code_orchestration_instructions)|"
+    r"\[TodoNotch-Completion-Check\]|"
     r"Only the tools attached to this request|sent this message, not the user\.|"
     r"Act as the (?:implementation|research|review) sub-agent)",
     re.I,

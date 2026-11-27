@@ -70,6 +70,10 @@ final class AppViewModel: ObservableObject {
     private var wakeGraceUntil: Int64 = 0
     private var tickCounter = 0
     private var bridgeStopRequests: [String: String] = [:]
+    private var isPollingTodoCompletions = false
+    private var todoPollFingerprints: [String: String] = [:]
+    private static let todoPollIntervalTicks = 100
+    private static let todoPollFingerprintsSettingKey = "todo_poll_fingerprints"
 
     var personalTodosOpen: [TodoItem] { todos.filter { $0.section == "personal" && !$0.done } }
     var projectTodosOpen: [TodoItem] { todos.filter { $0.section == "project" && !$0.done } }
@@ -110,6 +114,7 @@ final class AppViewModel: ObservableObject {
         self.health = LmemoryHealth(state: .unknown, detail: L10n.detectingHealth(self.activeLanguage))
 
         refreshSecretPreviews()
+        loadTodoPollFingerprints()
         reloadFromLocalState()
         setupSleepObservers()
         startBackgroundTimers()
@@ -275,6 +280,9 @@ final class AppViewModel: ObservableObject {
                 if self.tickCounter % 20 == 0 {
                     self.checkMissedRuns()
                 }
+                if self.tickCounter == 5 || self.tickCounter % Self.todoPollIntervalTicks == 0 {
+                    self.pollTodoCompletionsAsync(trigger: "timer")
+                }
                 self.recomputeRobot()
             }
         }
@@ -297,6 +305,7 @@ final class AppViewModel: ObservableObject {
         runFullDiscovery(isInitialSeed: false)
         loadTodosMarkdown()
         reconcileDispatchesAsync()
+        pollTodoCompletionsAsync(trigger: "manual")
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.65) { [weak self] in
             self?.isRefreshing = false
         }
@@ -584,6 +593,135 @@ final class AppViewModel: ObservableObject {
         selectedTodoKeys.removeAll()
         loadTodosMarkdown()
         recomputeRobot()
+    }
+
+    // MARK: - 5-Minute Todo Completion Polling
+
+    private func loadTodoPollFingerprints() {
+        guard let raw = store.getAllSettings()[Self.todoPollFingerprintsSettingKey],
+              let data = raw.data(using: .utf8),
+              let map = try? JSONDecoder().decode([String: String].self, from: data) else {
+            return
+        }
+        todoPollFingerprints = map
+    }
+
+    private func persistTodoPollFingerprints() {
+        let validKeys = Set(todos.map(\.todoKey))
+        if !validKeys.isEmpty {
+            todoPollFingerprints = todoPollFingerprints.filter { validKeys.contains($0.key) }
+        }
+        guard let data = try? JSONEncoder().encode(todoPollFingerprints),
+              let json = String(data: data, encoding: .utf8) else {
+            return
+        }
+        store.setSetting(Self.todoPollFingerprintsSettingKey, value: json)
+    }
+
+    func pollTodoCompletionsAsync(trigger: String) {
+        guard !isPollingTodoCompletions, sleepStartedAt == nil else { return }
+        let path = todoMarkdownPath
+        guard !path.isEmpty else { return }
+        let openTodos = personalTodosOpen + projectTodosOpen
+        guard !openTodos.isEmpty else { return }
+
+        isPollingTodoCompletions = true
+        let runningKeys = Set(dispatchesByKey.values.filter { $0.status == .running }.map(\.todoKey))
+        let vault = config.vaultPath
+        let prevFingerprints = todoPollFingerprints
+
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let markdown = try? String(contentsOfFile: path, encoding: .utf8) else {
+                Task { @MainActor [weak self] in
+                    self?.isPollingTodoCompletions = false
+                }
+                return
+            }
+            let fileMtime = ConversationTracker.fileMtime(path)
+            let baselineTs = TodoCompletionPoller.parseTodoBaselineTimestamp(
+                markdown: markdown,
+                fileMtime: fileMtime
+            )
+            let candidates = TodoCompletionPoller.collectChangedCandidates(
+                openTodos: openTodos,
+                runningTodoKeys: runningKeys,
+                baselineTs: baselineTs,
+                previousFingerprints: prevFingerprints,
+                vaultPath: vault
+            )
+            guard !candidates.isEmpty else {
+                Task { @MainActor [weak self] in
+                    self?.isPollingTodoCompletions = false
+                }
+                return
+            }
+
+            let result = TodoCompletionPoller.verifyCandidates(candidates: candidates)
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.isPollingTodoCompletions = false
+                for (k, v) in result.checkedFingerprints {
+                    self.todoPollFingerprints[k] = v
+                }
+                self.persistTodoPollFingerprints()
+
+                if !result.completedVerdicts.isEmpty,
+                   let freshMarkdown = try? String(contentsOfFile: path, encoding: .utf8) {
+                    let currentRunning = Set(
+                        self.dispatchesByKey.values.filter { $0.status == .running }.map(\.todoKey)
+                    )
+                    let applied = TodoCompletionPoller.applyAutoCompletions(
+                        to: freshMarkdown,
+                        verdicts: result.completedVerdicts,
+                        runningTodoKeys: currentRunning
+                    )
+                    if !applied.completedKeys.isEmpty {
+                        do {
+                            try applied.updatedMarkdown.write(toFile: path, atomically: true, encoding: .utf8)
+                            let completedSet = Set(applied.completedKeys)
+                            for key in applied.completedKeys {
+                                self.selectedTodoKeys.remove(key)
+                            }
+                            let labels = self.todos
+                                .filter { completedSet.contains($0.todoKey) }
+                                .map { "[\($0.project)]" }
+                            let reasons = result.completedVerdicts
+                                .filter { completedSet.contains($0.todoKey) }
+                                .map { "\($0.todoKey): \($0.reason)" }
+                                .joined(separator: "; ")
+                            self.store.appendAudit(
+                                action: "todo_auto_complete",
+                                target: result.cliUsed,
+                                result: "ok",
+                                detail: String("[\(trigger)] count=\(applied.completedKeys.count) \(reasons)".prefix(450))
+                            )
+                            self.loadTodosMarkdown()
+                            self.recomputeRobot()
+                            if !self.isDNDActiveNow() {
+                                self.triggerLightToast(
+                                    title: L10n.autoCompletedTodosTitle(applied.completedKeys.count, self.activeLanguage),
+                                    summary: L10n.autoCompletedTodosSummary(labels, self.activeLanguage)
+                                )
+                            }
+                        } catch {
+                            self.store.appendAudit(
+                                action: "todo_auto_complete",
+                                target: result.cliUsed,
+                                result: "error",
+                                detail: String(error.localizedDescription.prefix(300))
+                            )
+                        }
+                    }
+                } else if !result.errorDetail.isEmpty {
+                    self.store.appendAudit(
+                        action: "todo_poll_check",
+                        target: result.attemptedCLIs.joined(separator: ","),
+                        result: "error",
+                        detail: String("[\(trigger)] \(result.errorDetail)".prefix(400))
+                    )
+                }
+            }
+        }
     }
 
     func dispatchSelectedTodos() {
