@@ -7,7 +7,12 @@
 | `v0.2-design` (`20261124-1836`) | 2026-11-24 18:36 +08:00 | 建立首份本地触发契约（含开放第三方本地通知入口）与外部 SMTP/Webhook 推送契约 | `API-LOCAL-01`（`.trigger` JSON 事件）、`API-PUSH-01`（SMTP）、`API-PUSH-02`（Webhook） | 需求 `20261124-1748`（REQ-003, REQ-004, REQ-005） | 现行仅支持纯时间戳 `.trigger`；结构化契约为 v1 待实施 | 待实施与验证 |
 | `v1.0-impl` (`20261125-0815`) | 2026-11-25 08:15 +08:00 | 已实现 `inbox/` 原子 JSON 投递（`Watchers.swift` + `scan_todos.py`）、纯 Swift TLS 465 SMTP 与 5 平台 Webhook 客户端（`PushDispatcher.swift`） | `API-LOCAL-01`、`API-PUSH-01`、`API-PUSH-02` | 设计 `20261124-1836` 闭环实施 | macOS arm64 | 单元与隔离目录集成测试通过；真实 SMTP/Webhook 发信待用户在设置页填入授权码/URL 后实测 |
 | `v1.2-no-smtp` (`20261125-0933`) | 2026-11-25 09:33 +08:00 | 按用户确认移除 SMTP 邮件发送功能（`API-PUSH-01` 废弃），离席推送仅保留 5 平台 Webhook（`API-PUSH-02`） | `API-PUSH-01`（已移除） | 用户决定去掉邮箱发送功能 | macOS arm64 | `swift test` 8/8 通过，`TodoNotch.app` 重载生效 |
+| `20261126-desktop-dispatch` | 2026-11-26 11:01 +08:00 | Codex 停止等待原生 turn 终态，Antigravity 桥接新增按 dispatch_id 停止回执，定时任务历史可直达桌面详情 | API-LOCAL-DISPATCH | 11-26 用户确认的三项修复 | macOS arm64 本地开发版 | 两种 Agent 会话已读回，Codex 详情已确认，Antigravity 一键定位未通过 |
+| `20261126-desktop-followup` | 2026-11-26 11:48 +08:00 | 定时详情按原生 ID 搜索和回读，Antigravity 回执携带本轮回复位置 | API-LOCAL-DISPATCH | 11-26 早午班 14:31 和四项 P2 复验 | macOS arm64 本地开发版 | 核心回归通过，14:31 跳转实测打开 x-ai-vertical-daily |
 | `20261126-retention-filter` | 2026-11-26 12:58 +08:00 | Antigravity 确认识别到空列表后再提交目标筛选，选择唯一匹配项并核对详情地址 | API-LOCAL-DISPATCH | 用户要求修复旧列表误点 | macOS arm64 本地开发版 | 14:31 实机复验打开 x-ai-vertical-daily |
+| `20261126-completion-toast` | 2026-11-26 13:24 +08:00 | 核对成功事件的横幅图标调整，事件契约沿用现有定义 | API-LOCAL-01 | 用户要求完成时去掉截图中的机器人表情 | macOS arm64 本地开发版 | 已核对通知入口与路由 |
+| `20261126-search-replace` | 2026-11-26 14:00 +08:00 | Antigravity 搜索框以辅助功能接口替换整个查询值 | API-LOCAL-DISPATCH | 干净版复验出现查询拼接 | `e923f63` 加本次修复，macOS arm64 | 14:31 真实记录连续三次打开指定详情 |
+| `20261126-desktop-navigation-feedback` | 2026-11-26 21:35 +08:00 | 按来源返回可区分的桌面导航终态，Antigravity 增加中英文空结果和多候选保护 | API-LOCAL-DISPATCH | AC-DESKTOP-02 回归整改 | macOS arm64 本地源码 | 编译与定向单测通过，桌面待验 |
 
 ---
 
@@ -70,7 +75,13 @@ TodoNotch 为**纯本地 macOS 原生桌面应用**，不暴露公网 HTTP 监�
 | ZCode 定时任务 | `~/.zcode/cli/db/db.sqlite`、`~/.zcode/v2/{automations,scheduled-tasks,bot-config.v3}.json`、`~/.zcode/automations/*.json` | `SQLITE_OPEN_READONLY` + 只读 JSON | `workflow_definition`、`workflow_run` 及 JSON 定时任务字段 |
 | Lmemory 健康页 | `<Vault>/90 系统文件/自动化/夜间维护.md` | 只读 frontmatter | `nightly`, `nightly_at`, `lane` |
 
-## Antigravity 历史回执和桌面定位
+## 5. 手动执行和桌面定位（API-LOCAL-DISPATCH）
 
-- 已有的派发历史使用 `dispatch_id` 关联本机桥接 `results/<dispatch_id>.json`。终态回执回写原事件，保留已读和推送状态。
-- 历史跳转先在同一窗口的网页区域读取当前刷新请求对应的空结果，再按 `native_id` 筛选。完整读到且只有一条匹配行时才点击，并核对 Antigravity 详情地址。
+- 「未完成」和「定时任务」的手动运行创建一个 `dispatch_id`。等候、停止、结果都使用同一标识。停止已完成的运行时，保留 Agent 已确认的终态。
+- Codex 使用 `app-server` 非临时会话。收到停止后等待真实 `turnId`，发出 `turn/interrupt`，按 `turn/completed` 的 `interrupted` 确认停止。超时可结束进程并报告回执缺失。回写使用实际 thread ID 和原生 rollout 路径。
+- Antigravity 桌面桥把开始请求写入 `bridge/requests/<dispatch_id>.json`，把停止请求写入 `bridge/stops/<dispatch_id>.json`（UUID 文件名、原子写入）。启动和停止都绑定接收请求的桥接实例。桥接调用原生会话停止接口，按 `bridge/results/<dispatch_id>.json` 回写状态、会话 ID、桥接实例及本次停止请求 ID。拒绝停止时保持运行状态并回传对应错误。桥接断开且无最终回执时保留会话并显示待确认。
+- 定时任务历史打开 Codex 的本地 automation 深链，或通过 Antigravity 桌面「Automations」打开详情。定位使用任务自身的 `native_id`，日志按钮保持打开运行日志。
+
+- Antigravity 完成回执的 `reply_evidence` 包含本轮助手日志行的 `offset`、`length` 和 `step_index`。桥先匹配本轮用户提示词，再记录已完成助手消息的位置。接收端核对该行，缺失证据的旧回执保留待确认，避免引用其他轮次。
+- Codex 通过具备 `codex` URL 处理能力的 Codex 桌面应用受理本地 automation 深链。结果区分应用未安装、链接无法受理和 macOS 已受理。
+- Antigravity 历史跳转通过辅助功能接口替换搜索框的整个查询值。同一窗口的网页区域先读到本轮唯一查询的中英文空结果，再按 `native_id` 筛选。完整读到稳定的多个候选时停留在列表。唯一候选公开 ID 时要求精确匹配，未公开 ID 时只允许点击已识别的本地定时任务行。结果以详情路径 `/sidecars/<native_id>` 为准。

@@ -6,7 +6,12 @@
 |---|---|---|---|---|---|---|
 | `v0.2-design` (`20261124-1836`) | 2026-11-24 18:36 +08:00 | 建立首份本地存储规格：区分现行文件原型与 v1 待实施 SQLite 模型及 Keychain 凭据契约 | `monitored_tasks`、`run_events`、`notification_history`、`app_settings`、`audit_logs` | 需求 `20261124-1748`（REQ-002 ~ REQ-005） | 现行原型仅用 `state.json` + `每日待办.md`；SQLite 为 v1 待实施 | 待实施与验证 |
 | `v1.0-impl` (`20261125-0815`) | 2026-11-25 08:15 +08:00 | 已落地 `SQLiteStore.swift`（WAL、无外键、`user_version=1`）与 `KeychainSecretStore.swift`，并在本机自动建库落盘 | `~/Library/Application Support/TodoNotch/state.sqlite3`（4 表 + 6 索引） | 设计 `20261124-1836` 闭环实施 | macOS arm64 实机运行 | `swift test` 幂等与保留单测通过；实机建库并写入 22 条任务与 2 条事件 |
+| `v1.3-ui-i18n` (`20261125-1142`) | 2026-11-25 11:42 +08:00 | `app_settings` 新增 `language_mode`、`detected_ip_country` 键值（无表结构迁移）；`SQLiteStore` 新增 `listAllRecentWeekEvents` 批量 7 天查询 | `app_settings`、`run_events`（只读查询） | 需求 `20261125-1106`（`REQ-007`、`REQ-008`） | macOS arm64 | `swift test` 验证配置持久化与 7 天查询通过 |
+| `20261126-desktop-dispatch` | 2026-11-26 11:01 +08:00 | 沿用 todo_dispatches，保留同一次执行的 dispatch_id 及原生会话标识，无 DDL 变化 | todo_dispatches | 11-26 用户确认的启停联动 | macOS arm64 本地开发版 | 定向持久化测试与本机执行回执通过 |
+| `20261126-desktop-followup` | 2026-11-26 11:48 +08:00 | 迟到回执以 dispatch_id 原子更新执行状态和运行历史，兼容旧待确认事件 | todo_dispatches、run_events | 11-26 迟到终态复审 | macOS arm64 本地开发版 | 定向 SQLite 测试通过，无迁移 |
 | `20261126-retention-filter` | 2026-11-26 12:58 +08:00 | 未收回执的 Antigravity 待确认历史免于期限和数量裁剪 | run_events | 用户要求保留迟到回执关联依据 | macOS arm64 本地开发版 | 真实库只读检查，无迁移 |
+| `20261126-completion-toast` | 2026-11-26 13:24 +08:00 | 核对成功横幅使用现有运行结果 | run_events | 用户要求完成时去掉截图中的机器人表情 | macOS arm64 本地开发版 | 已核对事件读写路径，无迁移 |
+| `20261126-desktop-navigation-feedback` | 2026-11-26 21:35 +08:00 | 桌面导航沿用审计表记录脱敏终态 | audit_logs | AC-DESKTOP-02 回归整改 | macOS arm64 本地源码 | 编译通过，真实导航审计待验 |
 
 ---
 
@@ -90,6 +95,8 @@ CREATE TABLE IF NOT EXISTS app_settings (
 ### 3.4 `audit_logs`（本地操作审计表）
 业务含义：记录 Lmemory 部署/备份、任务级别变更、测试推送与推送失败等关键操作，便于故障定位，保留最近 30 天。
 
+桌面导航调用复用 `audit_logs`。操作为 `desktop_navigation`，`target` 为任务键的 SHA-256 摘要，`result` 为分类终态，`detail` 记录来源与阶段。保留沿用现行 30 天策略。
+
 ```sql
 CREATE TABLE IF NOT EXISTS audit_logs (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -112,3 +119,9 @@ CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs (created_at DESC);
   - 漏跑检查：`SELECT * FROM monitored_tasks WHERE source_status = 'active' AND next_due_at <= ?` → 命中 `idx_tasks_due`。
 - **幂等防重**：`run_events` 使用 `INSERT OR IGNORE INTO run_events (event_id, ...)`，`event_id` 由 `<task_key>:<conversationId 或 run_ts>` 确定性生成，保证重复轮询或重启绝不重复弹大窗、不重复发邮件/Webhook。
 - **迁移与恢复**：使用 `PRAGMA user_version` 管理顺序轻量迁移（`v0 → v1`）；如遇损坏，备份原库后重建，不影响外部 Agent 与 Vault 数据。
+
+## 手动执行状态
+
+`todo_dispatches` 仍按待办或定时任务键保存最新一轮执行。写入开始、运行和结束状态时沿用同一 `dispatch_id`，回调只更新匹配的当前执行，重启读回可使用保存的 Agent、原生会话 ID 和记录路径。桥接停止协议的回执归本地桥接目录管理，本次无需 SQLite 迁移。
+
+- 本机恢复 Antigravity 终态时，在一个 SQLite 事务中核对当前 `dispatch_id` 并回写 `todo_dispatches` 和 `run_events`。同 ID 的旧待确认事件更新结果并保留已读和推送记录。没有历史行时补写。待确认先持久化为已读历史，不触发推送。新一轮覆盖执行记录时，上一轮仍可按原 dispatch ID 纠正历史。手动停止记为 `stopped`，无新推送，未增加表或字段。

@@ -19,14 +19,14 @@ public enum PushError: LocalizedError, Sendable {
 public struct WebhookHTTPClient: Sendable {
     public init() {}
 
-    public func send(kind: WebhookKind, urlString: String, title: String, body: String) async throws {
+    public func send(kind: WebhookKind, urlString: String, title: String, body: String, lang: AppLanguage = .zhHans) async throws {
         guard ValidationHelpers.isValidWebhookURL(urlString), let url = URL(string: urlString) else {
-            throw PushError.invalidConfig("Webhook URL 不合法（仅允许 https:// 或 localhost）")
+            throw PushError.invalidConfig(L10n.webhookInvalidURL(lang))
         }
-        let payload = buildPayload(kind: kind, title: title, body: body)
+        let payload = buildPayload(kind: kind, title: title, body: body, lang: lang)
         let jsonData = try JSONSerialization.data(withJSONObject: payload, options: [])
         guard jsonData.count <= 16_384 else {
-            throw PushError.invalidConfig("Webhook 载荷超过 16 KB 上限")
+            throw PushError.invalidConfig(L10n.webhookPayloadTooLarge(lang))
         }
 
         var req = URLRequest(url: url, timeoutInterval: 10)
@@ -37,21 +37,21 @@ public struct WebhookHTTPClient: Sendable {
         do {
             let (_, response) = try await URLSession.shared.data(for: req)
             guard let http = response as? HTTPURLResponse else {
-                throw PushError.network("Webhook 未收到有效 HTTP 响应")
+                throw PushError.network(L10n.webhookInvalidResponse(lang))
             }
             guard (200...299).contains(http.statusCode) else {
                 // Never include full URL (contains embedded secret token) in error string
-                throw PushError.network("Webhook 返回 HTTP \(http.statusCode)")
+                throw PushError.network(L10n.webhookHTTPStatus(http.statusCode, lang))
             }
         } catch let err as PushError {
             throw err
         } catch {
-            throw PushError.network("Webhook 网络不可达或超时")
+            throw PushError.network(L10n.webhookNetworkUnreachable(lang))
         }
     }
 
-    public func buildPayload(kind: WebhookKind, title: String, body: String) -> [String: Any] {
-        let text = "【\(title)】\n\(body)"
+    public func buildPayload(kind: WebhookKind, title: String, body: String, lang: AppLanguage = .zhHans) -> [String: Any] {
+        let text = lang == .zhHans ? "【\(title)】\n\(body)" : "[\(title)]\n\(body)"
         switch kind {
         case .feishu:
             return ["msg_type": "text", "content": ["text": text]]
@@ -79,14 +79,20 @@ public actor PushDispatcher {
         self.secrets = secrets
     }
 
-    public func dispatch(event: RunEvent, config: AppConfig) async {
+    public func dispatch(event: RunEvent, config: AppConfig, lang: AppLanguage = .zhHans) async {
         guard config.webhookEnabled else { return }
         do {
             guard let url = secrets.loadSecret(account: SecretAccount.webhookURL), !url.isEmpty else {
-                throw PushError.missingSecret("未在钥匙串配置 Webhook URL")
+                throw PushError.missingSecret(L10n.webhookMissingInKeychain(lang))
             }
-            try await webhook.send(kind: config.webhookKind, urlString: url, title: event.taskName, body: event.summary)
-            store.appendAudit(action: "push_webhook", target: event.taskKey, result: "ok", detail: "已推送至 \(config.webhookKind.zhLabel)")
+            try await webhook.send(
+                kind: config.webhookKind,
+                urlString: url,
+                title: L10n.displayTaskName(event.taskName, source: event.source, lang: lang),
+                body: L10n.displayEventSummary(event.summary, status: event.status, lang: lang),
+                lang: lang
+            )
+            store.appendAudit(action: "push_webhook", target: event.taskKey, result: "ok", detail: "sent via \(config.webhookKind.rawValue)")
             store.updateEventPush(eventId: event.eventId, status: "sent", error: "")
         } catch {
             let msg = error.localizedDescription
@@ -95,14 +101,20 @@ public actor PushDispatcher {
         }
     }
 
-    public func sendTestWebhook(config: AppConfig) async -> Result<String, Error> {
+    public func sendTestWebhook(config: AppConfig, lang: AppLanguage = .zhHans) async -> Result<String, Error> {
         do {
             guard let url = secrets.loadSecret(account: SecretAccount.webhookURL), !url.isEmpty else {
-                throw PushError.missingSecret("请先输入并保存 Webhook URL")
+                throw PushError.missingSecret(L10n.webhookEnterURLFirst(lang))
             }
-            try await webhook.send(kind: config.webhookKind, urlString: url, title: "TodoNotch 测试通知", body: "Webhook 通道连接正常，定时任务异常与重点通知将推送至此。")
-            store.appendAudit(action: "push_webhook", target: "test", result: "ok", detail: "测试 Webhook 成功")
-            return .success("测试消息已推送至 \(config.webhookKind.zhLabel)")
+            try await webhook.send(
+                kind: config.webhookKind,
+                urlString: url,
+                title: L10n.webhookTestTitle(lang),
+                body: L10n.webhookTestBody(lang),
+                lang: lang
+            )
+            store.appendAudit(action: "push_webhook", target: "test", result: "ok", detail: "test webhook succeeded")
+            return .success(L10n.webhookTestSent(config.webhookKind, lang))
         } catch {
             store.appendAudit(action: "push_webhook", target: "test", result: "failed", detail: error.localizedDescription)
             return .failure(error)

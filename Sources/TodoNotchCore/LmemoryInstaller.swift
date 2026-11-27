@@ -113,7 +113,7 @@ public final class LmemoryInstallerService: @unchecked Sendable {
         return backupDir.path
     }
 
-    public func deploy(env: LmemoryEnvironment, vaultPath: String) -> [DeployAgentResult] {
+    public func deploy(env: LmemoryEnvironment, vaultPath: String, lang: AppLanguage = .zhHans) -> [DeployAgentResult] {
         let selected = env.agents.filter { $0.installed && $0.selected }
         _ = backupConfigs(for: selected)
 
@@ -124,14 +124,14 @@ public final class LmemoryInstallerService: @unchecked Sendable {
         var needBootstrap: [String] = []
         for ag in selected {
             if ag.lmemoryConnected {
-                results.append(DeployAgentResult(agent: ag.displayName, status: "ok", message: "已接入（幂等保留原有配置与 Vault）"))
+                results.append(DeployAgentResult(agent: ag.displayName, status: "ok", message: L10n.deployConnectedIdempotent(lang)))
             } else {
                 needBootstrap.append(ag.name)
             }
         }
 
         guard !needBootstrap.isEmpty else {
-            store?.appendAudit(action: "lmemory_deploy", target: "all", result: "ok", detail: "全部已接入，幂等跳过")
+            store?.appendAudit(action: "lmemory_deploy", target: "all", result: "ok", detail: "all connected, idempotent skip")
             return results
         }
 
@@ -139,10 +139,10 @@ public final class LmemoryInstallerService: @unchecked Sendable {
             for ag in needBootstrap {
                 results.append(DeployAgentResult(
                     agent: ag, status: "manual_needed",
-                    message: "未找到 Lmemory bootstrap.py，请先安装 Lmemory 后点击重新检测"
+                    message: L10n.deployMissingBootstrap(lang)
                 ))
             }
-            store?.appendAudit(action: "lmemory_deploy", target: needBootstrap.joined(separator: ","), result: "partial", detail: "缺少 bootstrap.py")
+            store?.appendAudit(action: "lmemory_deploy", target: needBootstrap.joined(separator: ","), result: "partial", detail: "missing bootstrap.py")
             return results
         }
 
@@ -151,7 +151,7 @@ public final class LmemoryInstallerService: @unchecked Sendable {
             if ag == "antigravity" {
                 results.append(DeployAgentResult(
                     agent: "Antigravity", status: "manual_needed",
-                    message: "请在 Antigravity Hooks 配置中引用 lmemory-agy.py（已备份原配置）"
+                    message: L10n.deployAgyManual(lang)
                 ))
                 continue
             }
@@ -167,19 +167,19 @@ public final class LmemoryInstallerService: @unchecked Sendable {
                 let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
                 if proc.terminationStatus == 0 {
                     if ag == "codex" {
-                        results.append(DeployAgentResult(agent: "Codex", status: "manual_needed", message: "已写入配置；请在 Codex 中执行一次 /hooks 信任确认"))
+                        results.append(DeployAgentResult(agent: "Codex", status: "manual_needed", message: L10n.deployCodexTrust(lang)))
                     } else {
-                        results.append(DeployAgentResult(agent: ag, status: "ok", message: "已接入并复用 Vault"))
+                        results.append(DeployAgentResult(agent: ag, status: "ok", message: L10n.deployConnectedVault(lang)))
                     }
                 } else {
-                    let brief = out.components(separatedBy: .newlines).last(where: { !$0.isEmpty }) ?? "退出码 \(proc.terminationStatus)"
-                    results.append(DeployAgentResult(agent: ag, status: "failed", message: "跳过（\(brief.prefix(80))），原配置已备份"))
+                    let brief = out.components(separatedBy: .newlines).last(where: { !$0.isEmpty }) ?? "exit \(proc.terminationStatus)"
+                    results.append(DeployAgentResult(agent: ag, status: "failed", message: L10n.deploySkipped(String(brief.prefix(80)), lang)))
                 }
             } catch {
-                results.append(DeployAgentResult(agent: ag, status: "failed", message: "启动部署脚本失败：\(error.localizedDescription)"))
+                results.append(DeployAgentResult(agent: ag, status: "failed", message: L10n.deployLaunchFailed(error.localizedDescription, lang)))
             }
         }
-        store?.appendAudit(action: "lmemory_deploy", target: needBootstrap.joined(separator: ","), result: "ok", detail: "完成 \(results.count) 项检测与部署")
+        store?.appendAudit(action: "lmemory_deploy", target: needBootstrap.joined(separator: ","), result: "ok", detail: "completed \(results.count) agent checks")
         return results
     }
 

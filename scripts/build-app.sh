@@ -36,6 +36,8 @@ if [ -f "$ROOT/scan_todos.py" ]; then
   chmod +x "$APP_OUT/Contents/Resources/scan_todos.py"
 fi
 
+cp "$ROOT/scripts/agy_bridge_sidecar.mjs" "$APP_OUT/Contents/Resources/agy_bridge_sidecar.mjs"
+
 ICON_PLIST=""
 if [ -f "$ROOT/Assets/AppIcon.icns" ]; then
   cp "$ROOT/Assets/AppIcon.icns" "$APP_OUT/Contents/Resources/AppIcon.icns"
@@ -66,8 +68,22 @@ ${ICON_PLIST}
 </plist>
 PLIST
 
-echo "[2/4] Ad-hoc signing bundle..."
-codesign --force --deep --sign - "$APP_OUT"
+SIGN_IDENTITY="${SIGN_IDENTITY:-}"
+if [ -z "$SIGN_IDENTITY" ]; then
+  if security find-identity -v -p codesigning 2>/dev/null | grep -q '"TodoNotch Local Dev"'; then
+    SIGN_IDENTITY="TodoNotch Local Dev"
+  else
+    SIGN_IDENTITY="-"
+  fi
+fi
+
+if [ "$SIGN_IDENTITY" = "-" ]; then
+  echo "[2/4] Ad-hoc signing bundle..."
+  codesign --force --deep --sign - "$APP_OUT"
+else
+  echo "[2/4] Signing bundle with '$SIGN_IDENTITY'..."
+  codesign --force --deep --timestamp=none --sign "$SIGN_IDENTITY" "$APP_OUT"
+fi
 
 echo "[3/4] Built bundle: $APP_OUT ($(du -sh "$APP_OUT/Contents/MacOS/TodoNotch" | awk '{print $1}'))"
 echo "[4/4] Done."

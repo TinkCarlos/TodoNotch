@@ -3,6 +3,12 @@ import SQLite3
 
 private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
+public enum EventInsertResult: Equatable, Sendable {
+    case inserted
+    case duplicate
+    case failed
+}
+
 public final class SQLiteStore: @unchecked Sendable {
     private var db: OpaquePointer?
     private let queue = DispatchQueue(label: "com.libo.TodoNotch.db")
@@ -93,7 +99,26 @@ public final class SQLiteStore: @unchecked Sendable {
               created_at INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs (created_at DESC);
-            PRAGMA user_version = 1;
+
+            CREATE TABLE IF NOT EXISTS todo_dispatches (
+              todo_key              TEXT PRIMARY KEY,
+              dispatch_id           TEXT NOT NULL,
+              project               TEXT NOT NULL,
+              todo_text             TEXT NOT NULL,
+              agent                 TEXT NOT NULL,
+              session_id            TEXT NOT NULL,
+              cwd                   TEXT NOT NULL,
+              transcript_path       TEXT NOT NULL DEFAULT '',
+              log_path              TEXT NOT NULL DEFAULT '',
+              status                TEXT NOT NULL,
+              summary               TEXT NOT NULL DEFAULT '',
+              dispatched_at         INTEGER NOT NULL,
+              updated_at            INTEGER NOT NULL,
+              last_transcript_mtime INTEGER NOT NULL DEFAULT 0,
+              pid                   INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_dispatches_status ON todo_dispatches (status, updated_at DESC);
+            PRAGMA user_version = 2;
             """)
         }
     }
@@ -222,10 +247,20 @@ public final class SQLiteStore: @unchecked Sendable {
 
     // MARK: - Run Events (Idempotent + Rolling Retention)
 
+    public func persistEvent(_ ev: RunEvent) -> EventInsertResult {
+        queue.sync {
+            switch writeEventLocked(ev) {
+            case .some(true): return .inserted
+            case .some(false): return .duplicate
+            case .none: return .failed
+            }
+        }
+    }
+
     /// An existing event ID produces no duplicate notification.
     @discardableResult
     public func insertEventIfNew(_ ev: RunEvent) -> Bool {
-        queue.sync { writeEventLocked(ev) == true }
+        persistEvent(ev) == .inserted
     }
 
     private func writeEventLocked(_ ev: RunEvent, replacingUnconfirmed: Bool = false) -> Bool? {
@@ -378,6 +413,24 @@ public final class SQLiteStore: @unchecked Sendable {
         }
     }
 
+    public func listAllRecentWeekEvents(now: Int64 = Int64(Date().timeIntervalSince1970)) -> [RunEvent] {
+        queue.sync {
+            let cutoff = now - 7 * 86400
+            let sql = """
+            SELECT event_id, task_key, task_name, source, status, summary,
+                   artifact_path, log_path, is_read, push_status, push_error, occurred_at, created_at
+            FROM run_events
+            WHERE occurred_at >= ?
+            ORDER BY occurred_at DESC LIMIT 400;
+            """
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_int64(stmt, 1, cutoff)
+            return readEventRows(stmt)
+        }
+    }
+
     private func readEventRows(_ stmt: OpaquePointer?) -> [RunEvent] {
         var out: [RunEvent] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
@@ -455,7 +508,9 @@ public final class SQLiteStore: @unchecked Sendable {
             dndEnd: m["dnd_end"] ?? "08:30",
             focusMode: m["focus_mode"] == "1",
             webhookEnabled: m["webhook_enabled"] == "1",
-            webhookKind: WebhookKind(rawValue: m["webhook_kind"] ?? "") ?? .feishu
+            webhookKind: WebhookKind(rawValue: m["webhook_kind"] ?? "") ?? .feishu,
+            languageMode: LanguageMode(rawValue: m["language_mode"] ?? "") ?? .auto,
+            detectedIPCountry: m["detected_ip_country"] ?? ""
         )
     }
 
@@ -469,6 +524,8 @@ public final class SQLiteStore: @unchecked Sendable {
         setSetting("focus_mode", value: cfg.focusMode ? "1" : "0")
         setSetting("webhook_enabled", value: cfg.webhookEnabled ? "1" : "0")
         setSetting("webhook_kind", value: cfg.webhookKind.rawValue)
+        setSetting("language_mode", value: cfg.languageMode.rawValue)
+        setSetting("detected_ip_country", value: cfg.detectedIPCountry)
     }
 
     public func appendAudit(action: String, target: String, result: String, detail: String) {
@@ -495,6 +552,143 @@ public final class SQLiteStore: @unchecked Sendable {
             defer { sqlite3_finalize(stmt) }
             return sqlite3_step(stmt) == SQLITE_ROW ? Int(sqlite3_column_int(stmt, 0)) : 0
         }
+    }
+
+    // MARK: - Todo Dispatches
+
+    public func upsertTodoDispatch(_ rec: TodoDispatchRecord) {
+        queue.sync { _ = upsertTodoDispatchLocked(rec) }
+    }
+
+    private func upsertTodoDispatchLocked(_ rec: TodoDispatchRecord) -> Bool {
+        let sql = """
+        INSERT OR REPLACE INTO todo_dispatches (
+          todo_key, dispatch_id, project, todo_text, agent, session_id, cwd,
+          transcript_path, log_path, status, summary, dispatched_at, updated_at,
+          last_transcript_mtime, pid
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return false }
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, 1, rec.todoKey)
+        bindText(stmt, 2, rec.dispatchId)
+        bindText(stmt, 3, rec.project)
+        bindText(stmt, 4, String(rec.todoText.prefix(500)))
+        bindText(stmt, 5, rec.agent)
+        bindText(stmt, 6, rec.sessionId)
+        bindText(stmt, 7, rec.cwd)
+        bindText(stmt, 8, rec.transcriptPath)
+        bindText(stmt, 9, rec.logPath)
+        bindText(stmt, 10, rec.status.rawValue)
+        bindText(stmt, 11, String(rec.summary.prefix(500)))
+        sqlite3_bind_int64(stmt, 12, rec.dispatchedAt)
+        sqlite3_bind_int64(stmt, 13, rec.updatedAt)
+        sqlite3_bind_int64(stmt, 14, rec.lastTranscriptMtime)
+        sqlite3_bind_int(stmt, 15, rec.pid)
+        guard sqlite3_step(stmt) == SQLITE_DONE else { return false }
+        try? exec("DELETE FROM todo_dispatches WHERE updated_at < \(rec.updatedAt - 30 * 86400);")
+        return true
+    }
+
+    /// Keep state and a pending or final history entry together, keyed by the native dispatch.
+    public func saveAntigravityDispatchAndHistory(_ rec: TodoDispatchRecord, event: RunEvent) -> Bool {
+        guard rec.agent == "antigravity", event.source == .antigravity,
+              event.eventId == "dispatch:\(rec.dispatchId)",
+              event.taskKey == rec.todoKey || event.taskKey == "dispatch:\(rec.todoKey)" else { return false }
+        return queue.sync {
+            do {
+                try exec("BEGIN IMMEDIATE;")
+            } catch {
+                return false
+            }
+            var committed = false
+            defer { if !committed { try? exec("ROLLBACK;") } }
+            var stmt: OpaquePointer?
+            let sql = "SELECT 1 FROM todo_dispatches WHERE todo_key = ? AND dispatch_id = ?;"
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return false }
+            bindText(stmt, 1, rec.todoKey)
+            bindText(stmt, 2, rec.dispatchId)
+            let current = sqlite3_step(stmt) == SQLITE_ROW
+            sqlite3_finalize(stmt)
+            guard current, upsertTodoDispatchLocked(rec), writeEventLocked(event, replacingUnconfirmed: true) != nil else {
+                return false
+            }
+            do {
+                try exec("COMMIT;")
+                committed = true
+                return true
+            } catch {
+                return false
+            }
+        }
+    }
+
+    public func listTodoDispatches() -> [TodoDispatchRecord] {
+        queue.sync {
+            let sql = """
+            SELECT todo_key, dispatch_id, project, todo_text, agent, session_id, cwd,
+                   transcript_path, log_path, status, summary, dispatched_at, updated_at,
+                   last_transcript_mtime, pid
+            FROM todo_dispatches
+            ORDER BY updated_at DESC;
+            """
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+            defer { sqlite3_finalize(stmt) }
+            var out: [TodoDispatchRecord] = []
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                out.append(readDispatchRow(stmt))
+            }
+            return out
+        }
+    }
+
+    public func getTodoDispatch(todoKey: String) -> TodoDispatchRecord? {
+        queue.sync {
+            let sql = """
+            SELECT todo_key, dispatch_id, project, todo_text, agent, session_id, cwd,
+                   transcript_path, log_path, status, summary, dispatched_at, updated_at,
+                   last_transcript_mtime, pid
+            FROM todo_dispatches WHERE todo_key = ? LIMIT 1;
+            """
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
+            defer { sqlite3_finalize(stmt) }
+            bindText(stmt, 1, todoKey)
+            guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+            return readDispatchRow(stmt)
+        }
+    }
+
+    public func deleteTodoDispatch(todoKey: String) {
+        queue.sync {
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, "DELETE FROM todo_dispatches WHERE todo_key = ?;", -1, &stmt, nil) == SQLITE_OK else { return }
+            defer { sqlite3_finalize(stmt) }
+            bindText(stmt, 1, todoKey)
+            sqlite3_step(stmt)
+        }
+    }
+
+    private func readDispatchRow(_ stmt: OpaquePointer?) -> TodoDispatchRecord {
+        TodoDispatchRecord(
+            todoKey: colText(stmt, 0),
+            dispatchId: colText(stmt, 1),
+            project: colText(stmt, 2),
+            todoText: colText(stmt, 3),
+            agent: colText(stmt, 4),
+            sessionId: colText(stmt, 5),
+            cwd: colText(stmt, 6),
+            transcriptPath: colText(stmt, 7),
+            logPath: colText(stmt, 8),
+            status: TodoDispatchStatus(rawValue: colText(stmt, 9)) ?? .failed,
+            summary: colText(stmt, 10),
+            dispatchedAt: sqlite3_column_int64(stmt, 11),
+            updatedAt: sqlite3_column_int64(stmt, 12),
+            lastTranscriptMtime: sqlite3_column_int64(stmt, 13),
+            pid: sqlite3_column_int(stmt, 14)
+        )
     }
 
     // MARK: - Helpers

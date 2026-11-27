@@ -1,9 +1,26 @@
 import Foundation
 import SQLite3
 
+public struct PendingInboxEvent: Sendable {
+    public let event: RunEvent
+    public let fileURL: URL
+
+    public init(event: RunEvent, fileURL: URL) {
+        self.event = event
+        self.fileURL = fileURL
+    }
+}
+
 public struct DiscoveredSnapshot: Sendable {
     public let tasks: [MonitoredTask]
     public let newEvents: [RunEvent]
+    public let pendingInbox: [PendingInboxEvent]
+
+    public init(tasks: [MonitoredTask], newEvents: [RunEvent], pendingInbox: [PendingInboxEvent] = []) {
+        self.tasks = tasks
+        self.newEvents = newEvents
+        self.pendingInbox = pendingInbox
+    }
 }
 
 public final class TaskDiscoveryService: @unchecked Sendable {
@@ -30,7 +47,7 @@ public final class TaskDiscoveryService: @unchecked Sendable {
         }
     }
 
-    public func scanAll() -> DiscoveredSnapshot {
+    public func scanAll(deferInboxDeletion: Bool = false) -> DiscoveredSnapshot {
         var allTasks: [MonitoredTask] = []
         var allEvents: [RunEvent] = []
 
@@ -57,10 +74,15 @@ public final class TaskDiscoveryService: @unchecked Sendable {
         let launchdTasks = scanLaunchAgents()
         allTasks.append(contentsOf: launchdTasks)
 
-        let inboxEvents = drainInbox()
-        allEvents.append(contentsOf: inboxEvents)
+        let pendingInbox: [PendingInboxEvent]
+        if deferInboxDeletion {
+            pendingInbox = readPendingInbox()
+        } else {
+            pendingInbox = []
+            allEvents.append(contentsOf: drainInbox())
+        }
 
-        return DiscoveredSnapshot(tasks: allTasks, newEvents: allEvents)
+        return DiscoveredSnapshot(tasks: allTasks, newEvents: allEvents, pendingInbox: pendingInbox)
     }
 
     // MARK: - Antigravity Read-Only Watcher
@@ -151,7 +173,11 @@ public final class TaskDiscoveryService: @unchecked Sendable {
         let size = (try? fh.seekToEnd()) ?? 0
         let start: UInt64 = size > 262_144 ? size - 262_144 : 0
         try? fh.seek(toOffset: start)
-        guard let raw = try? fh.readToEnd(), let text = String(data: raw, encoding: .utf8) else { return out }
+        guard let raw = try? fh.readToEnd() else { return out }
+        var text = String(decoding: raw, as: UTF8.self)
+        if start > 0, let nl = text.firstIndex(of: "\n") {
+            text = String(text[text.index(after: nl)...])
+        }
 
         let utcFmt = DateFormatter()
         utcFmt.dateFormat = "yyyy-MM-dd HH:mm:ss"
@@ -212,17 +238,17 @@ public final class TaskDiscoveryService: @unchecked Sendable {
         guard let dirs = try? fm.contentsOfDirectory(at: autoDir, includingPropertiesForKeys: nil) else {
             return ([], [])
         }
-        let dbMeta = readCodexDBReadOnly()
+        let now = Int64(Date().timeIntervalSince1970)
+        let dbMeta = readCodexDBReadOnly(now: now)
         var tasks: [MonitoredTask] = []
         var events: [RunEvent] = []
-        let now = Int64(Date().timeIntervalSince1970)
 
         for dir in dirs {
             let tomlURL = dir.appendingPathComponent("automation.toml")
             guard let text = try? String(contentsOf: tomlURL, encoding: .utf8) else { continue }
             let fields = parseSimpleTOML(text)
-            let id = fields["id"] ?? dir.lastPathComponent
-            let name = fields["name"] ?? id
+            let id = fields["id"].flatMap { $0.isEmpty ? nil : $0 } ?? dir.lastPathComponent
+            let name = fields["name"].flatMap { $0.isEmpty ? nil : $0 } ?? id
             let rawStatus = (fields["status"] ?? "PAUSED").lowercased()
             let sourceStatus = rawStatus == "active" ? "active" : "paused"
             let rrule = fields["rrule"] ?? ""
@@ -244,7 +270,7 @@ public final class TaskDiscoveryService: @unchecked Sendable {
                 updatedAt: now
             ))
 
-            if let run = meta?.latestRun {
+            for run in meta?.runs ?? [] {
                 events.append(RunEvent(
                     eventId: "\(taskKey):\(run.threadId):\(run.updatedAt)",
                     taskKey: taskKey,
@@ -261,7 +287,7 @@ public final class TaskDiscoveryService: @unchecked Sendable {
     }
 
     private struct CodexDBMeta {
-        struct LatestRun {
+        struct RunEntry {
             let threadId: String
             let status: RunStatus
             let summary: String
@@ -270,10 +296,10 @@ public final class TaskDiscoveryService: @unchecked Sendable {
         var lastRunAt: Int64?
         var nextRunAt: Int64?
         var lastStatus: RunStatus = .unknown
-        var latestRun: LatestRun?
+        var runs: [RunEntry] = []
     }
 
-    private func readCodexDBReadOnly() -> [String: CodexDBMeta] {
+    private func readCodexDBReadOnly(now: Int64) -> [String: CodexDBMeta] {
         let dbPath = homeDir.appendingPathComponent(".codex/sqlite/codex.db").path
         guard FileManager.default.fileExists(atPath: dbPath) else { return [:] }
         var db: OpaquePointer?
@@ -297,31 +323,37 @@ public final class TaskDiscoveryService: @unchecked Sendable {
             sqlite3_finalize(stmt)
         }
 
+        let sevenDaysAgo = now - 7 * 86400
         if sqlite3_prepare_v2(
             db,
-            "SELECT automation_id, thread_id, status, COALESCE(inbox_summary, inbox_title, ''), updated_at FROM automation_runs ORDER BY updated_at DESC LIMIT 50;",
+            "SELECT automation_id, thread_id, status, COALESCE(NULLIF(inbox_summary, ''), NULLIF(inbox_title, ''), ''), updated_at FROM automation_runs ORDER BY updated_at DESC LIMIT 200;",
             -1, &stmt, nil
         ) == SQLITE_OK {
             while sqlite3_step(stmt) == SQLITE_ROW {
                 guard let cAid = sqlite3_column_text(stmt, 0),
                       let cTid = sqlite3_column_text(stmt, 1) else { continue }
                 let aid = String(cString: cAid)
-                if out[aid]?.latestRun != nil { continue }
                 let tid = String(cString: cTid)
                 let stRaw = sqlite3_column_text(stmt, 2).map { String(cString: $0).lowercased() } ?? ""
                 let summary = sqlite3_column_text(stmt, 3).map { String(cString: $0) } ?? ""
                 let updated = normalizeUnixSeconds(sqlite3_column_int64(stmt, 4))
                 let status: RunStatus
-                if stRaw.contains("fail") || stRaw.contains("err") {
+                if stRaw.contains("fail") || stRaw.contains("err") || stRaw.contains("timeout") {
                     status = .error
-                } else if stRaw.contains("run") || stRaw.contains("pend") {
+                } else if stRaw.contains("cancel") || stRaw.contains("interrupt") || stRaw.contains("stop") || stRaw.contains("abort") {
+                    status = .stopped
+                } else if stRaw.contains("run") || stRaw.contains("pend") || stRaw.contains("progress") || stRaw.contains("queue") {
                     status = .running
                 } else {
                     status = .success
                 }
                 var m = out[aid] ?? CodexDBMeta()
-                m.lastStatus = status
-                m.latestRun = CodexDBMeta.LatestRun(threadId: tid, status: status, summary: summary, updatedAt: updated)
+                if m.lastStatus == .unknown {
+                    m.lastStatus = status
+                }
+                if updated >= sevenDaysAgo && m.runs.count < 30 {
+                    m.runs.append(CodexDBMeta.RunEntry(threadId: tid, status: status, summary: summary, updatedAt: updated))
+                }
                 out[aid] = m
             }
             sqlite3_finalize(stmt)
@@ -342,13 +374,44 @@ public final class TaskDiscoveryService: @unchecked Sendable {
             guard let eq = trimmed.firstIndex(of: "=") else { continue }
             let key = trimmed[..<eq].trimmingCharacters(in: .whitespaces)
             if !["id", "name", "status", "rrule", "target_thread_id", "updated_at"].contains(key) { continue }
-            var val = trimmed[trimmed.index(after: eq)...].trimmingCharacters(in: .whitespaces)
-            if val.hasPrefix("\"") && val.hasSuffix("\"") && val.count >= 2 {
-                val = String(val.dropFirst().dropLast())
-            }
-            out[key] = val
+            let rawVal = trimmed[trimmed.index(after: eq)...].trimmingCharacters(in: .whitespaces)
+            out[key] = parseSimpleTOMLValue(rawVal)
         }
         return out
+    }
+
+    private func parseSimpleTOMLValue(_ raw: String) -> String {
+        if raw.hasPrefix("\"") {
+            var out = ""
+            var i = raw.index(after: raw.startIndex)
+            while i < raw.endIndex {
+                let ch = raw[i]
+                if ch == "\"" { break }
+                if ch == "\\", let next = raw.index(i, offsetBy: 1, limitedBy: raw.endIndex), next < raw.endIndex {
+                    let esc = raw[next]
+                    switch esc {
+                    case "n": out.append("\n")
+                    case "r": out.append("\r")
+                    case "t": out.append("\t")
+                    case "\"": out.append("\"")
+                    case "\\": out.append("\\")
+                    default: out.append(esc)
+                    }
+                    i = raw.index(after: next)
+                } else {
+                    out.append(ch)
+                    i = raw.index(after: i)
+                }
+            }
+            return out
+        }
+        if raw.hasPrefix("'"), let close = raw[raw.index(after: raw.startIndex)...].firstIndex(of: "'") {
+            return String(raw[raw.index(after: raw.startIndex)..<close])
+        }
+        if let commentIdx = raw.firstIndex(of: "#") {
+            return raw[..<commentIdx].trimmingCharacters(in: .whitespaces)
+        }
+        return raw
     }
 
     // MARK: - WorkBuddy Read-Only Watcher (~/.workbuddy/workbuddy.db & ~/.workbuddy-ai/workbuddy.db)
@@ -877,13 +940,13 @@ public final class TaskDiscoveryService: @unchecked Sendable {
 
     // MARK: - Local Drop-in Inbox (API-LOCAL-01)
 
-    public func drainInbox() -> [RunEvent] {
+    public func readPendingInbox() -> [PendingInboxEvent] {
         ensureInboxDir()
         let fm = FileManager.default
         guard let files = try? fm.contentsOfDirectory(at: inboxDir, includingPropertiesForKeys: [.fileSizeKey]) else {
             return []
         }
-        var out: [RunEvent] = []
+        var out: [PendingInboxEvent] = []
         let rejectedDir = inboxDir.appendingPathComponent("rejected")
         let now = Int64(Date().timeIntervalSince1970)
 
@@ -905,7 +968,7 @@ public final class TaskDiscoveryService: @unchecked Sendable {
             let summary = (obj["summary"] as? String) ?? ""
             let artifactPath = (obj["artifact_path"] as? String) ?? ""
             let logPath = (obj["log_path"] as? String) ?? ""
-            out.append(RunEvent(
+            let event = RunEvent(
                 eventId: eventId,
                 taskKey: "\(src.rawValue):\(taskId)",
                 taskName: taskName,
@@ -916,10 +979,22 @@ public final class TaskDiscoveryService: @unchecked Sendable {
                 logPath: logPath,
                 occurredAt: now,
                 createdAt: now
-            ))
-            try? fm.removeItem(at: url)
+            )
+            out.append(PendingInboxEvent(event: event, fileURL: url))
         }
         return out
+    }
+
+    public func acknowledgeInboxFile(_ url: URL) {
+        try? FileManager.default.removeItem(at: url)
+    }
+
+    public func drainInbox() -> [RunEvent] {
+        let pending = readPendingInbox()
+        for item in pending {
+            acknowledgeInboxFile(item.fileURL)
+        }
+        return pending.map(\.event)
     }
 
     // MARK: - Lmemory Health Monitor
